@@ -1,0 +1,25 @@
+{
+  "name": "memory-as-reasoning",
+  "version": "0.1.0",
+  "description": "Claude Code plugin implementing memory as dynamic reasoning rather than static storage",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mem-reason": "dist/index.js"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "dev": "bun run src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "uuid": "^11.0.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.7.2"
+  }
+}
