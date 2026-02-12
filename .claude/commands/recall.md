@@ -9,7 +9,7 @@ Dynamic memory system that stores beliefs derived from session activity. Unlike 
 ## Parse Arguments
 
 Extract from `$ARGUMENTS`:
-- **No args**: Show current memory context (beliefs)
+- **No args**: Auto-detect phase — load beliefs at session start, or derive/save beliefs after work
 - **reason**: Analyze recent events and derive new beliefs
 - **search <query>**: Search beliefs and events
 - **add <belief>**: Add a new belief manually
@@ -60,7 +60,11 @@ mem-reason invalidate <id> -r "<reason>"
 
 Based on `$ARGUMENTS`:
 
-1. **Default (no args)**: Run `mem-reason context` to show current beliefs
+1. **Default (no args)**: Auto-detect session phase:
+   - Run `mem-reason init` if `.memorai/` doesn't exist
+   - Run `mem-reason events -l 5` to check for recent activity
+   - **If no/few events** (start of session): Run `mem-reason context` to load existing beliefs into your working context. Briefly summarize what you remember.
+   - **If events exist** (after work): Run `mem-reason reason`, analyze the output, then derive 0-3 new beliefs using `mem-reason add-belief`. Update or invalidate any contradicted beliefs.
 2. **`reason`**: Run `mem-reason reason` to get analysis prompt, then:
    - Analyze the events and existing beliefs
    - Derive 0-3 new beliefs based on patterns you observe
