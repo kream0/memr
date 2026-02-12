@@ -17,7 +17,7 @@ const program = new Command();
 program
   .name('mem-reason')
   .description('Memory-as-Reasoning: Dynamic belief system for Claude Code')
-  .version('0.1.0');
+  .version('0.2.0');
 
 // Initialize command
 program
