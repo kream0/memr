@@ -287,6 +287,96 @@ User / Claude Code
    └── context ──────→ BeliefStore ──→ Formatted context output
 ```
 
+### How beliefs are structured, stored, and updated
+
+```
+                          ┌─────────────────────────────────────────────┐
+                          │              .memorai/memory.db              │
+                          └─────────────────────────────────────────────┘
+
+  EVENTS (append-only)                              BELIEFS (mutable)
+  ════════════════════                              ═════════════════
+
+  ┌──────────────────┐   reasoning    ┌──────────────────────────────────────┐
+  │ id               │──────────────→ │ id                                   │
+  │ type             │   derives      │ text   "Prefers async/await"         │
+  │ session_id       │                │ domain  user_preference              │
+  │ timestamp        │                │                                      │
+  │ payload   {...}  │                │ confidence  0.85  ← decays daily     │
+  │ context   {...}  │                │ importance  7                        │
+  │ searchable_text  │                │                                      │
+  │ processed?       │                │ evidence_ids  [event-1, event-3]     │
+  └──────────────────┘                │ supporting_count     3               │
+                                      │ contradicting_count  0               │
+  Event types:                        │                                      │
+   • tool_call                        │ derived_at       1706889600          │
+   • user_message                     │ last_evaluated   1706976000          │
+   • file_change                      │                                      │
+   • error                            │ supersedes_id?   (prev belief)       │
+   • observation                      │ invalidated_at?  null = active       │
+   • assistant_message                │ invalidation_reason?                 │
+   • session_start/end                │                                      │
+                                      │ tags        [async, style]           │
+                                      │ embedding   Float[384]               │
+                                      └──────────────────────────────────────┘
+
+  LIFECYCLE OF A BELIEF
+  ═════════════════════
+
+  ┌─────────┐     ┌──────────┐     ┌───────────┐     ┌─────────────┐
+  │ Derived │────→│  Active   │────→│  Decaying  │────→│  Archived   │
+  │ (new)   │     │ conf≥0.5  │     │ 0.3–0.5   │     │  conf<0.3   │
+  └─────────┘     └──────────┘     └───────────┘     └─────────────┘
+       │               │ ↑                                    │
+       │               │ │ +support                           │
+       │               │ │ (reinforced)                       │
+       │               │ ↓                                    │
+       │          ┌──────────┐                                │
+       │          │ Reviewed  │  contradictions               │
+       │          │ (flagged) │  ≥ threshold                  │
+       │          └──────────┘                                │
+       │               │                                      │
+       │               ↓                                      │
+       │     ┌───────────────────┐                            │
+       └────→│   Invalidated     │←───────────────────────────┘
+             │ (explicit reason) │   can also be manually
+             └───────────────────┘   invalidated at any stage
+
+  CONFIDENCE UPDATES
+  ══════════════════
+
+  New belief created ─────────────────→ confidence = 0.7 (default)
+                                             │
+          ┌──────────────────────────────────┤
+          │                                  │
+    +support evidence                  time passes (no evidence)
+    ──────────────────                 ────────────────────────
+    confidence ↑                       confidence -= 0.01/day
+    supporting_count++                 min floor = 0.3
+          │                                  │
+          │                            +contradict evidence
+          │                            ───────────────────
+          │                            contradicting_count++
+          │                            if ≥ 3 → flagged for review
+          │                                  │
+          └───────────→ belief ←─────────────┘
+                     (updated)
+
+  SEARCH (hybrid)
+  ═══════════════
+
+  query: "error handling"
+          │
+          ├──→ FTS5 keyword search ──→ beliefs_fts (text, tags)
+          │         ranked by relevance
+          │
+          ├──→ Semantic search ──────→ cosine similarity on
+          │         384-dim hash embeddings
+          │
+          └──→ Merge + deduplicate ──→ combined ranked results
+                  hybrid > semantic > keyword-only
+```
+
 ### Storage layer
 
 SQLite database (`.memorai/memory.db`) with WAL mode for concurrent access and FTS5 virtual tables for full-text search. Tables: `events`, `beliefs`, `predictions`, `sessions`, `events_fts`, `beliefs_fts`.
