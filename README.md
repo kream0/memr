@@ -254,13 +254,13 @@ Beliefs are classified into one of six domains:
 
 ### Decay
 
-Beliefs lose confidence over time without reinforcing evidence:
+Beliefs lose confidence over time without reinforcing evidence, **but only if their domain has seen recent activity**. A `project_structure` belief won't decay just because you're writing code in a different area — it takes `file_change` events to put that domain on the clock.
 
 ```
 new_confidence = max(minConfidenceFloor, confidence - (confidenceDecayPerDay × days_elapsed))
 ```
 
-With defaults, a belief decays at **1% per day** and is auto-archived below **0.3** confidence.
+With defaults, a belief decays at **1% per day** and is auto-archived below **0.3** confidence. Beliefs in inactive domains hold their confidence indefinitely until relevant events occur.
 
 ### Evidence tracking
 
@@ -353,6 +353,27 @@ User / Claude Code
     ──────────────────                 ────────────────────────
     confidence ↑                       confidence -= 0.01/day
     supporting_count++                 min floor = 0.3
+          │                                  │
+          │                            BUT only if the belief's
+          │                            domain has seen activity:
+          │                                  │
+          │                            ┌─────┴──────────────┐
+          │                            │ Event-to-Domain map │
+          │                            │                     │
+          │                            │ file_change ──→     │
+          │                            │   code_pattern,     │
+          │                            │   project_structure │
+          │                            │ tool_call ────→     │
+          │                            │   workflow,         │
+          │                            │   code_pattern      │
+          │                            │ user_message ──→    │
+          │                            │   user_preference   │
+          │                            │ error ────────→     │
+          │                            │   code_pattern      │
+          │                            └────────────────────┘
+          │                                  │
+          │                            No events in domain?
+          │                            → No decay. Belief holds.
           │                                  │
           │                            +contradict evidence
           │                            ───────────────────
