@@ -1,5 +1,5 @@
 {
-  "name": "memory-as-reasoning",
+  "name": "memr",
   "version": "0.1.0",
   "description": "Claude Code plugin implementing memory as dynamic reasoning rather than static storage",
   "type": "module",
