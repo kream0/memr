@@ -10,7 +10,7 @@ A Claude Code CLI plugin that captures events, derives mutable beliefs with conf
 
 - **Captures events** — tool calls, messages, file changes, errors — as an append-only log
 - **Derives beliefs** — mutable statements with confidence scores, evidence tracking, and domain classification
-- **Decays over time** — beliefs lose confidence without reinforcing evidence, keeping memory current
+- **Explicit invalidation** — beliefs persist until contradicted or invalidated
 - **Searches intelligently** — combines SQLite FTS5 keyword search with hash-based semantic similarity
 
 The CLI tool `mem-reason` can be used standalone or integrated into Claude Code via the `/recall` skill.
@@ -250,17 +250,7 @@ Beliefs are classified into one of six domains:
 | 0.7–0.9 | Confident — clear supporting evidence |
 | 0.5–0.7 | Moderate — some supporting evidence |
 | 0.3–0.5 | Low — weak or conflicting evidence |
-| < 0.3 | Auto-archived — belief becomes inactive |
-
-### Decay
-
-Beliefs lose confidence over time without reinforcing evidence, **but only if their domain has seen recent activity**. A `project_structure` belief won't decay just because you're writing code in a different area — it takes `file_change` events to put that domain on the clock.
-
-```
-new_confidence = max(minConfidenceFloor, confidence - (confidenceDecayPerDay × days_elapsed))
-```
-
-With defaults, a belief decays at **1% per day** and is auto-archived below **0.3** confidence. Beliefs in inactive domains hold their confidence indefinitely until relevant events occur.
+| < 0.3 | Very low — review recommended |
 
 ### Evidence tracking
 
@@ -302,7 +292,7 @@ User / Claude Code
   │ type             │   derives      │ text   "Prefers async/await"         │
   │ session_id       │                │ domain  user_preference              │
   │ timestamp        │                │                                      │
-  │ payload   {...}  │                │ confidence  0.85  ← decays daily     │
+  │ payload   {...}  │                │ confidence  0.85                      │
   │ context   {...}  │                │ importance  7                        │
   │ searchable_text  │                │                                      │
   │ processed?       │                │ evidence_ids  [event-1, event-3]     │
@@ -323,24 +313,17 @@ User / Claude Code
   LIFECYCLE OF A BELIEF
   ═════════════════════
 
-  ┌─────────┐     ┌──────────┐     ┌───────────┐     ┌─────────────┐
-  │ Derived │────→│  Active   │────→│  Decaying  │────→│  Archived   │
-  │ (new)   │     │ conf≥0.5  │     │ 0.3–0.5   │     │  conf<0.3   │
-  └─────────┘     └──────────┘     └───────────┘     └─────────────┘
-       │               │ ↑                                    │
-       │               │ │ +support                           │
-       │               │ │ (reinforced)                       │
-       │               │ ↓                                    │
-       │          ┌──────────┐                                │
-       │          │ Reviewed  │  contradictions               │
-       │          │ (flagged) │  ≥ threshold                  │
-       │          └──────────┘                                │
-       │               │                                      │
-       │               ↓                                      │
-       │     ┌───────────────────┐                            │
-       └────→│   Invalidated     │←───────────────────────────┘
-             │ (explicit reason) │   can also be manually
-             └───────────────────┘   invalidated at any stage
+  ┌─────────┐     ┌──────────┐     ┌──────────────┐     ┌───────────────────┐
+  │ Derived │────→│  Active   │────→│ Contradicted  │────→│   Invalidated     │
+  │ (new)   │     │           │     │ (flagged ≥3)  │     │ (explicit reason) │
+  └─────────┘     └──────────┘     └──────────────┘     └───────────────────┘
+       │               │                                          ↑
+       │               │          +support                        │
+       │               │←──────── (reinforced)                    │
+       │               │                                          │
+       │               └──── directly invalidated ────────────────┘
+       │                                                          │
+       └──────────── directly invalidated ────────────────────────┘
 
   CONFIDENCE UPDATES
   ══════════════════
@@ -349,36 +332,13 @@ User / Claude Code
                                              │
           ┌──────────────────────────────────┤
           │                                  │
-    +support evidence                  time passes (no evidence)
-    ──────────────────                 ────────────────────────
-    confidence ↑                       confidence -= 0.01/day
-    supporting_count++                 min floor = 0.3
+    +support evidence                  +contradict evidence
+    ──────────────────                 ───────────────────
+    confidence ↑                       contradicting_count++
+    supporting_count++                 if ≥ 3 → flagged for review
           │                                  │
-          │                            BUT only if the belief's
-          │                            domain has seen activity:
-          │                                  │
-          │                            ┌─────┴──────────────┐
-          │                            │ Event-to-Domain map │
-          │                            │                     │
-          │                            │ file_change ──→     │
-          │                            │   code_pattern,     │
-          │                            │   project_structure │
-          │                            │ tool_call ────→     │
-          │                            │   workflow,         │
-          │                            │   code_pattern      │
-          │                            │ user_message ──→    │
-          │                            │   user_preference   │
-          │                            │ error ────────→     │
-          │                            │   code_pattern      │
-          │                            └────────────────────┘
-          │                                  │
-          │                            No events in domain?
-          │                            → No decay. Belief holds.
-          │                                  │
-          │                            +contradict evidence
-          │                            ───────────────────
-          │                            contradicting_count++
-          │                            if ≥ 3 → flagged for review
+          │                            confidence ↓
+          │                            (explicit adjustment)
           │                                  │
           └───────────→ belief ←─────────────┘
                      (updated)
@@ -404,7 +364,7 @@ SQLite database (`.memorai/memory.db`) with WAL mode for concurrent access and F
 
 ### Belief store
 
-CRUD operations on beliefs with hybrid search (keyword + semantic), confidence decay, and domain-based aggregation. Beliefs are stored with 384-dimensional embeddings for semantic similarity.
+CRUD operations on beliefs with hybrid search (keyword + semantic) and domain-based aggregation. Beliefs are stored with 384-dimensional embeddings for semantic similarity.
 
 ### Event store
 
@@ -450,8 +410,6 @@ Configuration lives in `.memorai/config.json` (created on `init`, git-ignored):
   "dataDir": ".memorai",
   "embeddingModel": "bge-large-en-v1.5",
   "contradictionThreshold": 3,
-  "confidenceDecayPerDay": 0.01,
-  "minConfidenceFloor": 0.3,
   "consolidationEventThreshold": 50,
   "consolidationIntervalMinutes": 30
 }
@@ -462,8 +420,6 @@ Configuration lives in `.memorai/config.json` (created on `init`, git-ignored):
 | `dataDir` | `.memorai` | Storage directory |
 | `embeddingModel` | `bge-large-en-v1.5` | Embedding model identifier |
 | `contradictionThreshold` | `3` | Contradictions before review |
-| `confidenceDecayPerDay` | `0.01` | Confidence loss per day |
-| `minConfidenceFloor` | `0.3` | Auto-archive threshold |
 | `consolidationEventThreshold` | `50` | Events before consolidation |
 | `consolidationIntervalMinutes` | `30` | Min minutes between consolidations |
 
@@ -480,7 +436,7 @@ memory-as-reasoning/
 │   │   └── prompts.ts            # Inference and contradiction prompts
 │   ├── storage/
 │   │   ├── sqlite.ts             # Database initialization and schema
-│   │   ├── belief-store.ts       # Belief CRUD, search, and decay
+│   │   ├── belief-store.ts       # Belief CRUD, search, and confidence management
 │   │   ├── event-store.ts        # Event capture and retrieval
 │   │   ├── prediction-store.ts   # Prediction storage and feedback
 │   │   └── session-store.ts      # Session lifecycle management

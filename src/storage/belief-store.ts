@@ -1,9 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { getDatabase } from './sqlite.js';
-import { getEventStore } from './event-store.js';
 import { generateEmbedding, cosineSimilarity } from '../utils/embeddings.js';
 import type { Belief, BeliefDomain, SearchOptions, BeliefSearchResult } from '../types.js';
-import { loadConfig } from '../utils/config.js';
 
 export class BeliefStore {
   private get db() {
@@ -181,17 +179,16 @@ export class BeliefStore {
   adjustConfidence(ids: string[], delta: number): void {
     if (ids.length === 0) return;
 
-    const config = loadConfig();
     const placeholders = ids.map(() => '?').join(',');
 
-    // Clamp confidence between minConfidenceFloor and 1.0
+    // Clamp confidence between 0.0 and 1.0
     const stmt = this.db.prepare(`
       UPDATE beliefs
-      SET confidence = MAX(?, MIN(1.0, confidence + ?))
+      SET confidence = MAX(0.0, MIN(1.0, confidence + ?))
       WHERE id IN (${placeholders})
     `);
 
-    stmt.run(config.minConfidenceFloor, delta, ...ids);
+    stmt.run(delta, ...ids);
   }
 
   searchKeyword(query: string, options: SearchOptions = {}): Belief[] {
@@ -341,45 +338,6 @@ export class BeliefStore {
     }
 
     return stats as Record<BeliefDomain, { count: number; avgConfidence: number }>;
-  }
-
-  applyConfidenceDecay(): number {
-    const config = loadConfig();
-    const now = Date.now();
-    const dayInMs = 24 * 60 * 60 * 1000;
-
-    // Find the earliest last_evaluated among active beliefs
-    const minRow = this.db.prepare(
-      'SELECT MIN(last_evaluated) as earliest FROM beliefs WHERE invalidated_at IS NULL AND confidence > ?'
-    ).get(config.minConfidenceFloor) as { earliest: number | null };
-
-    if (!minRow?.earliest) return 0;
-
-    // Only decay beliefs in domains where relevant events have occurred
-    const eventStore = getEventStore();
-    const activeDomains = eventStore.getActiveDomainsSince(minRow.earliest);
-
-    if (activeDomains.length === 0) return 0;
-
-    const placeholders = activeDomains.map(() => '?').join(',');
-    const stmt = this.db.prepare(`
-      UPDATE beliefs
-      SET confidence = MAX(?, confidence - ? * ((? - last_evaluated) / ?))
-      WHERE invalidated_at IS NULL
-        AND confidence > ?
-        AND domain IN (${placeholders})
-    `);
-
-    const result = stmt.run(
-      config.minConfidenceFloor,
-      config.confidenceDecayPerDay,
-      now,
-      dayInMs,
-      config.minConfidenceFloor,
-      ...activeDomains
-    );
-
-    return result.changes;
   }
 
   private rowToBelief(row: BeliefRow): Belief {

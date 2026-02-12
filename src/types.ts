@@ -116,19 +116,6 @@ export interface InferenceResult {
   invalidations: { id: string; reason: string }[];
 }
 
-// Event-to-Domain mapping: which belief domains are affected by which event types
-// Beliefs only decay in domains where relevant events have occurred.
-export const EVENT_DOMAIN_MAP: Record<EventType, BeliefDomain[]> = {
-  file_change:       ['code_pattern', 'project_structure'],
-  tool_call:         ['workflow', 'code_pattern'],
-  user_message:      ['user_preference'],
-  assistant_message: [],
-  error:             ['code_pattern'],
-  observation:       [],
-  session_start:     [],
-  session_end:       [],
-};
-
 // Search/Query Types
 
 export interface SearchOptions {
@@ -157,8 +144,6 @@ export interface Config {
   anthropicApiKey?: string;
   embeddingModel: string;
   contradictionThreshold: number;
-  confidenceDecayPerDay: number;
-  minConfidenceFloor: number;
   consolidationEventThreshold: number;
   consolidationIntervalMinutes: number;
 }
@@ -167,8 +152,6 @@ export const DEFAULT_CONFIG: Config = {
   dataDir: '.memorai',
   embeddingModel: 'bge-large-en-v1.5',
   contradictionThreshold: 3,
-  confidenceDecayPerDay: 0.01,
-  minConfidenceFloor: 0.3,
   consolidationEventThreshold: 50,
   consolidationIntervalMinutes: 30,
 };

@@ -88,7 +88,7 @@ Based on `$ARGUMENTS`:
 - 0.7-0.9: Confident, clear evidence
 - 0.5-0.7: Moderate, some evidence
 - 0.3-0.5: Low, weak or conflicting evidence
-- Below 0.3: Auto-archive threshold
+- Below 0.3: Very low confidence, review recommended
 
 ### Example Session
 
@@ -109,6 +109,6 @@ Added 1 new belief to memory.
 
 - Initialize with `mem-reason init` before first use in a project
 - The `.memorai` directory should be gitignored
-- Beliefs decay over time without supporting evidence
+- Beliefs persist until explicitly contradicted or invalidated
 - Contradicting evidence reduces confidence
 - Focus on actionable, specific beliefs

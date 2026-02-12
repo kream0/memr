@@ -1,7 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { getDatabase } from './sqlite.js';
-import type { Event, EventType, EventPayload, EventContext, SearchOptions, BeliefDomain } from '../types.js';
-import { EVENT_DOMAIN_MAP } from '../types.js';
+import type { Event, EventType, EventPayload, EventContext, SearchOptions } from '../types.js';
 
 export class EventStore {
   private get db() {
@@ -172,23 +171,6 @@ export class EventStore {
     const rows = stmt.all(...params) as EventRow[];
 
     return rows.map((row) => this.rowToEvent(row));
-  }
-
-  getActiveDomainsSince(sinceTimestamp: number): BeliefDomain[] {
-    const stmt = this.db.prepare(
-      'SELECT DISTINCT type FROM events WHERE timestamp > ?'
-    );
-    const rows = stmt.all(sinceTimestamp) as { type: string }[];
-
-    const domains = new Set<BeliefDomain>();
-    for (const row of rows) {
-      const mapped = EVENT_DOMAIN_MAP[row.type as EventType];
-      if (mapped) {
-        for (const d of mapped) domains.add(d);
-      }
-    }
-
-    return [...domains];
   }
 
   count(sessionId?: string): number {
