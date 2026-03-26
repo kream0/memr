@@ -1,157 +1,114 @@
-// Event Types - Raw, Immutable storage
-
-export type EventType =
-  | 'tool_call'
-  | 'user_message'
-  | 'assistant_message'
-  | 'observation'
-  | 'file_change'
-  | 'error'
-  | 'session_start'
-  | 'session_end';
-
-export interface EventPayload {
-  tool_name?: string;
-  tool_input?: Record<string, unknown>;
-  tool_output?: string;
-  message_role?: 'user' | 'assistant';
-  message_content?: string;
-  file_path?: string;
-  change_type?: 'create' | 'edit' | 'delete';
-  error_message?: string;
-}
-
-export interface EventContext {
-  active_file?: string;
-  recent_files?: string[];
-  git_branch?: string;
-  working_directory?: string;
-}
-
-export interface Event {
-  id: string;
-  type: EventType;
-  session_id: string;
-  timestamp: number;
-  payload: EventPayload;
-  context: EventContext;
-  searchable_text: string;
-  processed?: boolean;
-}
-
-// Belief Types - Derived, Mutable
-
+// Belief Domain — categorizes WHERE a belief lives
 export type BeliefDomain =
-  | 'code_pattern'
-  | 'user_preference'
-  | 'project_structure'
-  | 'workflow'
-  | 'decision'
-  | 'constraint';
+  | 'handoff'      // Session continuity — what was happening, what's next
+  | 'watch'        // Regression monitors — things to verify, fragile fixes
+  | 'project'      // Per-project operational state (ports, versions, DB)
+  | 'stakeholder'  // People, their asks, pending deliverables
+  | 'rule'         // Hard constraints, mandatory behaviors, owner mandates
+  | 'pattern'      // Proven workflows, architecture decisions, deploy pipelines
+  | 'infra'        // Infrastructure facts (ports, services, topology, VPS state)
+  | 'skill';       // Tool/skill existence and usage patterns
+
+// Belief Type — categorizes WHAT kind of knowledge
+export type BeliefType =
+  | 'directive'    // "Always do X", "Never do Y" — actionable instruction
+  | 'fact'         // "Port 5433 runs cosware" — verifiable state
+  | 'handoff'      // "Session 26 was working on X, next: Y" — session continuity
+  | 'watch'        // "Verify voice transcription still works" — regression monitor
+  | 'decision'     // "We chose MariaDB over Postgres because..." — rationale
+  | 'pending';     // "Hicham waiting for migration SQL" — unresolved deliverable
+
+export type Importance = 1 | 2 | 3 | 4 | 5;
+// 5 = CRITICAL (10% of beliefs) — violation causes owner frustration
+// 4 = HIGH (20%) — required for competent operation
+// 3 = STANDARD (40%) — useful context that improves quality
+// 2 = LOW (20%) — nice to know, not critical
+// 1 = ARCHIVE (10%) — historical, rarely needed
 
 export interface Belief {
   id: string;
-  text: string;
+  text: string;                    // Max 300 chars — atomic, actionable
   domain: BeliefDomain;
-  confidence: number;
-  evidence_ids: string[];
-  supporting_count: number;
-  contradicting_count: number;
+  belief_type: BeliefType;
+  confidence: number;              // 0.0-1.0, decays over time
+  importance: Importance;          // 1-5, algorithmically computed
+  tags: string[];
+
+  // Structured metadata (nullable, domain-dependent)
+  project?: string;                // Which project (null = global)
+  stakeholder?: string;            // Who this involves
+  verify_by?: number;              // When to re-verify (for 'watch' type)
+  expires_at?: number;             // Auto-invalidate after this (for 'handoff')
+  action?: string;                 // What to DO about this
+  source_session?: number;         // Session number that created this
+
+  // Lifecycle
   derived_at: number;
   last_evaluated: number;
   supersedes_id?: string;
   invalidated_at?: number;
   invalidation_reason?: string;
-  embedding?: number[];
-  importance: number;
-  tags: string[];
 }
 
-// Prediction Types - Ephemeral
-
-export interface PredictionItem {
-  action: string;
-  confidence: number;
-  reasoning: string;
-  supporting_beliefs: string[];
+export interface NewBelief {
+  text: string;
+  domain: BeliefDomain;
+  belief_type?: BeliefType;
+  confidence?: number;
+  importance?: Importance;
+  tags?: string[];
+  project?: string;
+  stakeholder?: string;
+  verify_by?: number;
+  expires_at?: number;
+  action?: string;
+  source_session?: number;
+  supersedes_id?: string;
 }
 
-export interface PredictionOutcome {
-  correct: boolean;
-  actual_action?: string;
-  evaluated_at: number;
+export interface ScoredBelief {
+  belief: Belief;
+  score: number;
+  estimatedTokens: number;
 }
 
-export interface Prediction {
-  id: string;
-  generated_at: number;
-  context_hash: string;
-  predictions: PredictionItem[];
-  outcome?: PredictionOutcome;
+export interface ContextOptions {
+  tokenBudget: number;
+  sessionType: 'interactive' | 'headless' | 'project';
+  projectName?: string;
 }
-
-// Session Types
-
-export interface Session {
-  id: string;
-  started_at: number;
-  ended_at?: number;
-  summary?: string;
-  event_count: number;
-}
-
-// Reasoning Types
-
-export type ContradictionLevel = 'SUPPORTS' | 'NEUTRAL' | 'WEAKLY_CONTRADICTS' | 'STRONGLY_CONTRADICTS';
-
-export interface ContradictionResult {
-  belief_id: string;
-  level: ContradictionLevel;
-  explanation?: string;
-}
-
-export interface InferenceResult {
-  newBeliefs: Omit<Belief, 'id'>[];
-  updates: { id: string; changes: Partial<Belief> }[];
-  invalidations: { id: string; reason: string }[];
-}
-
-// Search/Query Types
 
 export interface SearchOptions {
   limit?: number;
   minConfidence?: number;
   domain?: BeliefDomain;
-  timeRange?: { start: number; end: number };
   activeOnly?: boolean;
 }
 
-export interface BeliefSearchResult {
-  belief: Belief;
-  score: number;
-  matchType: 'semantic' | 'keyword' | 'hybrid';
+// Domain lifecycle configuration
+export interface DomainLifecycle {
+  ttlDays: number | null;        // null = no expiry
+  decayRate: number;             // confidence decay per day
+  decayAfterDays: number;        // when decay starts
+  autoExpire: boolean;
+  maxPerDomain: number;
 }
 
-export interface EventSearchResult {
-  event: Event;
-  score: number;
-}
-
-// Configuration
+export const DOMAIN_LIFECYCLES: Record<BeliefDomain, DomainLifecycle> = {
+  handoff:     { ttlDays: 2,    decayRate: 0,     decayAfterDays: 0,  autoExpire: true,  maxPerDomain: 5 },
+  watch:       { ttlDays: 7,    decayRate: 0.03,  decayAfterDays: 0,  autoExpire: true,  maxPerDomain: 30 },
+  project:     { ttlDays: null, decayRate: 0.01,  decayAfterDays: 14, autoExpire: false, maxPerDomain: 50 },
+  stakeholder: { ttlDays: null, decayRate: 0,     decayAfterDays: 0,  autoExpire: false, maxPerDomain: 30 },
+  rule:        { ttlDays: null, decayRate: 0,     decayAfterDays: 0,  autoExpire: false, maxPerDomain: 50 },
+  pattern:     { ttlDays: null, decayRate: 0.005, decayAfterDays: 30, autoExpire: false, maxPerDomain: 50 },
+  infra:       { ttlDays: null, decayRate: 0.01,  decayAfterDays: 14, autoExpire: false, maxPerDomain: 50 },
+  skill:       { ttlDays: null, decayRate: 0,     decayAfterDays: 0,  autoExpire: false, maxPerDomain: 30 },
+};
 
 export interface Config {
   dataDir: string;
-  anthropicApiKey?: string;
-  embeddingModel: string;
-  contradictionThreshold: number;
-  consolidationEventThreshold: number;
-  consolidationIntervalMinutes: number;
 }
 
 export const DEFAULT_CONFIG: Config = {
   dataDir: '.memorai',
-  embeddingModel: 'bge-large-en-v1.5',
-  contradictionThreshold: 3,
-  consolidationEventThreshold: 50,
-  consolidationIntervalMinutes: 30,
 };

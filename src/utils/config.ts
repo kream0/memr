@@ -1,6 +1,5 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
-import { homedir } from 'os';
 import type { Config } from '../types.js';
 import { DEFAULT_CONFIG } from '../types.js';
 
@@ -37,11 +36,6 @@ export function loadConfig(projectDir?: string): Config {
     config = { ...DEFAULT_CONFIG };
   }
 
-  // Override with environment variables
-  if (process.env.ANTHROPIC_API_KEY) {
-    config.anthropicApiKey = process.env.ANTHROPIC_API_KEY;
-  }
-
   config.dataDir = getDataDir(projectDir);
   cachedConfig = config;
 
@@ -59,8 +53,8 @@ export function saveConfig(config: Partial<Config>, projectDir?: string): void {
   const current = loadConfig(projectDir);
   const updated = { ...current, ...config };
 
-  // Don't save sensitive data or computed paths
-  const { anthropicApiKey, dataDir, ...toSave } = updated;
+  // Don't save computed paths
+  const { dataDir, ...toSave } = updated;
 
   writeFileSync(path, JSON.stringify(toSave, null, 2));
   cachedConfig = updated;
@@ -71,12 +65,6 @@ export function ensureDataDir(projectDir?: string): string {
 
   if (!existsSync(dataDir)) {
     mkdirSync(dataDir, { recursive: true });
-  }
-
-  // Create subdirectories
-  const chromaDir = join(dataDir, 'chroma');
-  if (!existsSync(chromaDir)) {
-    mkdirSync(chromaDir, { recursive: true });
   }
 
   return dataDir;
