@@ -5,8 +5,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 
 import { join, basename } from 'path';
 
 import { ensureDataDir, loadConfig } from './utils/config.js';
-import { getDatabase, closeDatabase } from './storage/sqlite.js';
-import { getBeliefStore } from './storage/belief-store.js';
+import { getBeliefStore, getDatabase, closeDatabase } from './storage/belief-store.js';
 import { autoDetectDomain } from './utils/scoring.js';
 import type { BeliefDomain, BeliefType, Importance } from './types.js';
 import { DOMAIN_LIFECYCLES } from './types.js';

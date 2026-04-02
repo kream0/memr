@@ -800,3 +800,7 @@ export function getBeliefStore(): BeliefStore {
 export function resetBeliefStore(): void {
   beliefStore = null;
 }
+
+// Re-export database functions so index.ts doesn't import sqlite.ts directly.
+// This prevents bun's bundler from duplicating the sqlite module (and its db singleton).
+export { getDatabase, closeDatabase } from './sqlite.js';

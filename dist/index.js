@@ -1891,7 +1891,7 @@ var {
 
 // src/index.ts
 import { existsSync as existsSync3, readFileSync as readFileSync3, readdirSync, writeFileSync as writeFileSync3, mkdirSync as mkdirSync3 } from "fs";
-import { join as join5, basename } from "path";
+import { join as join4, basename } from "path";
 
 // src/utils/config.ts
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
@@ -1952,7 +1952,56 @@ function ensureDataDir(projectDir) {
   }
   return dataDir;
 }
+// node_modules/uuid/dist/esm/native.js
+import { randomUUID } from "crypto";
+var native_default = { randomUUID };
 
+// node_modules/uuid/dist/esm/rng.js
+import { randomFillSync } from "crypto";
+var rnds8Pool = new Uint8Array(256);
+var poolPtr = rnds8Pool.length;
+function rng() {
+  if (poolPtr > rnds8Pool.length - 16) {
+    randomFillSync(rnds8Pool);
+    poolPtr = 0;
+  }
+  return rnds8Pool.slice(poolPtr, poolPtr += 16);
+}
+
+// node_modules/uuid/dist/esm/stringify.js
+var byteToHex = [];
+for (let i = 0;i < 256; ++i) {
+  byteToHex.push((i + 256).toString(16).slice(1));
+}
+function unsafeStringify(arr, offset = 0) {
+  return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
+}
+
+// node_modules/uuid/dist/esm/v4.js
+function v4(options, buf, offset) {
+  if (native_default.randomUUID && !buf && !options) {
+    return native_default.randomUUID();
+  }
+  options = options || {};
+  const rnds = options.random ?? options.rng?.() ?? rng();
+  if (rnds.length < 16) {
+    throw new Error("Random bytes length must be >= 16");
+  }
+  rnds[6] = rnds[6] & 15 | 64;
+  rnds[8] = rnds[8] & 63 | 128;
+  if (buf) {
+    offset = offset || 0;
+    if (offset < 0 || offset + 16 > buf.length) {
+      throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
+    }
+    for (let i = 0;i < 16; ++i) {
+      buf[offset + i] = rnds[i];
+    }
+    return buf;
+  }
+  return unsafeStringify(rnds);
+}
+var v4_default = v4;
 // src/storage/sqlite.ts
 import { Database } from "bun:sqlite";
 import { join as join3 } from "path";
@@ -2211,293 +2260,6 @@ function closeDatabase() {
   if (db) {
     db.close();
     db = null;
-  }
-}
-// node_modules/uuid/dist/esm/native.js
-import { randomUUID } from "crypto";
-var native_default = { randomUUID };
-
-// node_modules/uuid/dist/esm/rng.js
-import { randomFillSync } from "crypto";
-var rnds8Pool = new Uint8Array(256);
-var poolPtr = rnds8Pool.length;
-function rng() {
-  if (poolPtr > rnds8Pool.length - 16) {
-    randomFillSync(rnds8Pool);
-    poolPtr = 0;
-  }
-  return rnds8Pool.slice(poolPtr, poolPtr += 16);
-}
-
-// node_modules/uuid/dist/esm/stringify.js
-var byteToHex = [];
-for (let i = 0;i < 256; ++i) {
-  byteToHex.push((i + 256).toString(16).slice(1));
-}
-function unsafeStringify(arr, offset = 0) {
-  return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
-}
-
-// node_modules/uuid/dist/esm/v4.js
-function v4(options, buf, offset) {
-  if (native_default.randomUUID && !buf && !options) {
-    return native_default.randomUUID();
-  }
-  options = options || {};
-  const rnds = options.random ?? options.rng?.() ?? rng();
-  if (rnds.length < 16) {
-    throw new Error("Random bytes length must be >= 16");
-  }
-  rnds[6] = rnds[6] & 15 | 64;
-  rnds[8] = rnds[8] & 63 | 128;
-  if (buf) {
-    offset = offset || 0;
-    if (offset < 0 || offset + 16 > buf.length) {
-      throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
-    }
-    for (let i = 0;i < 16; ++i) {
-      buf[offset + i] = rnds[i];
-    }
-    return buf;
-  }
-  return unsafeStringify(rnds);
-}
-var v4_default = v4;
-// src/storage/sqlite.ts
-import { Database as Database2 } from "bun:sqlite";
-import { join as join4 } from "path";
-var db2 = null;
-function getDatabase2(projectDir) {
-  if (db2)
-    return db2;
-  const dataDir = ensureDataDir2(projectDir);
-  const dbPath = join4(dataDir, "memory.db");
-  db2 = new Database2(dbPath);
-  db2.exec("PRAGMA journal_mode = WAL");
-  db2.exec("PRAGMA foreign_keys = ON");
-  initializeSchema2(db2);
-  return db2;
-}
-function isV1Schema2(database) {
-  try {
-    const row = database.query("SELECT COUNT(*) as cnt FROM pragma_table_info('beliefs') WHERE name = 'evidence_ids'").get();
-    return row !== null && row.cnt > 0;
-  } catch {
-    return false;
-  }
-}
-function isV2Schema2(database) {
-  try {
-    const row = database.query("SELECT COUNT(*) as cnt FROM pragma_table_info('beliefs') WHERE name = 'belief_type'").get();
-    return row !== null && row.cnt > 0;
-  } catch {
-    return false;
-  }
-}
-function migrateV1toV22(database) {
-  database.exec("BEGIN TRANSACTION");
-  try {
-    database.exec(`
-      CREATE TABLE beliefs_v2 (
-        id TEXT PRIMARY KEY,
-        text TEXT NOT NULL CHECK(length(text) <= 500),
-        domain TEXT NOT NULL CHECK(domain IN (
-          'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
-        )),
-        belief_type TEXT NOT NULL DEFAULT 'fact' CHECK(belief_type IN (
-          'directive','fact','handoff','watch','decision','pending'
-        )),
-        confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
-        importance INTEGER NOT NULL DEFAULT 3 CHECK(importance >= 1 AND importance <= 5),
-        tags TEXT,
-
-        project TEXT,
-        stakeholder TEXT,
-        verify_by INTEGER,
-        expires_at INTEGER,
-        action TEXT,
-        source_session INTEGER,
-
-        derived_at INTEGER NOT NULL,
-        last_evaluated INTEGER NOT NULL,
-        supersedes_id TEXT REFERENCES beliefs(id),
-        invalidated_at INTEGER,
-        invalidation_reason TEXT,
-        created_at INTEGER DEFAULT (strftime('%s','now') * 1000)
-      )
-    `);
-    const oldRows = database.query("SELECT id, text, domain, confidence, derived_at, last_evaluated, supersedes_id, invalidated_at, invalidation_reason, importance, tags, created_at FROM beliefs").all();
-    const insert = database.prepare(`
-      INSERT INTO beliefs_v2 (
-        id, text, domain, belief_type, confidence, importance, tags,
-        derived_at, last_evaluated, supersedes_id, invalidated_at, invalidation_reason, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    for (const row of oldRows) {
-      const { newDomain, newType } = reclassify2(row.domain, row.text);
-      const clampedImportance = Math.max(1, Math.min(5, row.importance ?? 3));
-      const truncatedText = row.text.length > 500 ? row.text.slice(0, 497) + "..." : row.text;
-      insert.run(row.id, truncatedText, newDomain, newType, row.confidence, clampedImportance, row.tags, row.derived_at, row.last_evaluated, row.supersedes_id, row.invalidated_at, row.invalidation_reason, row.created_at);
-    }
-    database.exec("DROP TRIGGER IF EXISTS beliefs_ai");
-    database.exec("DROP TRIGGER IF EXISTS beliefs_ad");
-    database.exec("DROP TRIGGER IF EXISTS beliefs_au");
-    database.exec("DROP TRIGGER IF EXISTS events_ai");
-    database.exec("DROP TRIGGER IF EXISTS events_ad");
-    database.exec("DROP TRIGGER IF EXISTS events_au");
-    database.exec("DROP TABLE IF EXISTS beliefs_fts");
-    database.exec("DROP TABLE IF EXISTS events_fts");
-    database.exec("DROP TABLE IF EXISTS predictions");
-    database.exec("DROP TABLE IF EXISTS sessions");
-    database.exec("DROP TABLE IF EXISTS events");
-    database.exec("ALTER TABLE beliefs RENAME TO beliefs_legacy");
-    database.exec("ALTER TABLE beliefs_v2 RENAME TO beliefs");
-    database.exec("COMMIT");
-  } catch (e) {
-    database.exec("ROLLBACK");
-    throw e;
-  }
-}
-function reclassify2(oldDomain, text) {
-  const upper = text.toUpperCase();
-  switch (oldDomain) {
-    case "constraint": {
-      const isDirective = /\b(NEVER|MUST|ALWAYS)\b/.test(upper);
-      return { newDomain: "rule", newType: isDirective ? "directive" : "fact" };
-    }
-    case "workflow": {
-      if (/HANDOFF/i.test(text)) {
-        return { newDomain: "handoff", newType: "handoff" };
-      }
-      return { newDomain: "pattern", newType: "fact" };
-    }
-    case "decision":
-      return { newDomain: "pattern", newType: "decision" };
-    case "project_structure":
-      return { newDomain: "infra", newType: "fact" };
-    case "code_pattern":
-      return { newDomain: "pattern", newType: "fact" };
-    case "user_preference":
-      return { newDomain: "rule", newType: "fact" };
-    default: {
-      const validDomains = ["handoff", "watch", "project", "stakeholder", "rule", "pattern", "infra", "skill"];
-      if (validDomains.includes(oldDomain)) {
-        return { newDomain: oldDomain, newType: inferType2(text) };
-      }
-      return { newDomain: "pattern", newType: "fact" };
-    }
-  }
-}
-function inferType2(text) {
-  const upper = text.toUpperCase();
-  if (/\b(NEVER|MUST|ALWAYS|SHALL NOT|REQUIRED)\b/.test(upper))
-    return "directive";
-  if (/\bHANDOFF\b/i.test(text))
-    return "handoff";
-  if (/\bWATCH\b/i.test(text))
-    return "watch";
-  if (/\bPENDING\b/i.test(text))
-    return "pending";
-  return "fact";
-}
-function createV2Schema2(database) {
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS beliefs (
-      id TEXT PRIMARY KEY,
-      text TEXT NOT NULL CHECK(length(text) <= 500),
-      domain TEXT NOT NULL CHECK(domain IN (
-        'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
-      )),
-      belief_type TEXT NOT NULL DEFAULT 'fact' CHECK(belief_type IN (
-        'directive','fact','handoff','watch','decision','pending'
-      )),
-      confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
-      importance INTEGER NOT NULL DEFAULT 3 CHECK(importance >= 1 AND importance <= 5),
-      tags TEXT,
-
-      project TEXT,
-      stakeholder TEXT,
-      verify_by INTEGER,
-      expires_at INTEGER,
-      action TEXT,
-      source_session INTEGER,
-
-      derived_at INTEGER NOT NULL,
-      last_evaluated INTEGER NOT NULL,
-      supersedes_id TEXT REFERENCES beliefs(id),
-      invalidated_at INTEGER,
-      invalidation_reason TEXT,
-      created_at INTEGER DEFAULT (strftime('%s','now') * 1000)
-    )
-  `);
-}
-function createIndexes2(database) {
-  database.exec(`
-    CREATE INDEX IF NOT EXISTS idx_active ON beliefs(invalidated_at) WHERE invalidated_at IS NULL;
-    CREATE INDEX IF NOT EXISTS idx_domain ON beliefs(domain) WHERE invalidated_at IS NULL;
-    CREATE INDEX IF NOT EXISTS idx_type ON beliefs(belief_type) WHERE invalidated_at IS NULL;
-    CREATE INDEX IF NOT EXISTS idx_importance ON beliefs(importance DESC) WHERE invalidated_at IS NULL;
-    CREATE INDEX IF NOT EXISTS idx_project ON beliefs(project) WHERE invalidated_at IS NULL AND project IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_expires ON beliefs(expires_at) WHERE invalidated_at IS NULL AND expires_at IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_context ON beliefs(invalidated_at, belief_type, importance DESC) WHERE invalidated_at IS NULL;
-  `);
-}
-function createFTS2(database) {
-  try {
-    database.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS beliefs_fts USING fts5(
-        text, tags, project, stakeholder,
-        content='beliefs',
-        content_rowid='rowid',
-        tokenize="unicode61 tokenchars '-_.'"
-      )
-    `);
-  } catch {}
-}
-function createTriggers2(database) {
-  const triggers = [
-    `CREATE TRIGGER IF NOT EXISTS beliefs_ai AFTER INSERT ON beliefs BEGIN
-      INSERT INTO beliefs_fts(rowid, text, tags, project, stakeholder)
-      VALUES (NEW.rowid, NEW.text, NEW.tags, NEW.project, NEW.stakeholder);
-    END`,
-    `CREATE TRIGGER IF NOT EXISTS beliefs_ad AFTER DELETE ON beliefs BEGIN
-      INSERT INTO beliefs_fts(beliefs_fts, rowid, text, tags, project, stakeholder)
-      VALUES('delete', OLD.rowid, OLD.text, OLD.tags, OLD.project, OLD.stakeholder);
-    END`,
-    `CREATE TRIGGER IF NOT EXISTS beliefs_au AFTER UPDATE ON beliefs BEGIN
-      INSERT INTO beliefs_fts(beliefs_fts, rowid, text, tags, project, stakeholder)
-      VALUES('delete', OLD.rowid, OLD.text, OLD.tags, OLD.project, OLD.stakeholder);
-      INSERT INTO beliefs_fts(rowid, text, tags, project, stakeholder)
-      VALUES (NEW.rowid, NEW.text, NEW.tags, NEW.project, NEW.stakeholder);
-    END`
-  ];
-  for (const trigger of triggers) {
-    try {
-      database.exec(trigger);
-    } catch {}
-  }
-}
-function rebuildFTS2(database) {
-  try {
-    database.exec("INSERT INTO beliefs_fts(beliefs_fts) VALUES('rebuild')");
-  } catch {}
-}
-function initializeSchema2(database) {
-  if (isV1Schema2(database)) {
-    migrateV1toV22(database);
-    createIndexes2(database);
-    createFTS2(database);
-    createTriggers2(database);
-    rebuildFTS2(database);
-  } else if (isV2Schema2(database)) {
-    createIndexes2(database);
-    createFTS2(database);
-    createTriggers2(database);
-  } else {
-    createV2Schema2(database);
-    createIndexes2(database);
-    createFTS2(database);
-    createTriggers2(database);
   }
 }
 
@@ -2947,7 +2709,7 @@ function formatOrientOutput(beliefs, totalStored) {
 // src/storage/belief-store.ts
 class BeliefStore {
   get db() {
-    return getDatabase2();
+    return getDatabase();
   }
   create(input) {
     const domain = input.domain ?? autoDetectDomain(input.text);
@@ -3698,7 +3460,7 @@ program2.command("init").description("Initialize .memorai directory").action(() 
 });
 program2.command("status").description("Show belief stats").action(() => {
   const config = loadConfig();
-  if (!existsSync3(join5(config.dataDir, "memory.db"))) {
+  if (!existsSync3(join4(config.dataDir, "memory.db"))) {
     console.log("Memory system not initialized. Run `mem-reason init` first.");
     return;
   }
@@ -3978,7 +3740,7 @@ function extractBeliefText(body, description) {
   return result;
 }
 program2.command("import-memories <dir>").description("Import auto-memory .md files into memr beliefs").option("--dry-run", "Show what would be imported without modifying").option("--force", "Import even if duplicates detected").action((dir, options) => {
-  const resolvedDir = dir.startsWith("/") ? dir : join5(process.cwd(), dir);
+  const resolvedDir = dir.startsWith("/") ? dir : join4(process.cwd(), dir);
   if (!existsSync3(resolvedDir)) {
     console.error(`Directory not found: ${resolvedDir}`);
     process.exit(1);
@@ -3992,7 +3754,7 @@ program2.command("import-memories <dir>").description("Import auto-memory .md fi
   const force = !!options.force;
   if (!dryRun) {
     const config = loadConfig();
-    if (!existsSync3(join5(config.dataDir, "memory.db"))) {
+    if (!existsSync3(join4(config.dataDir, "memory.db"))) {
       console.error("Memory system not initialized. Run `mem-reason init` first.");
       process.exit(1);
     }
@@ -4002,7 +3764,7 @@ program2.command("import-memories <dir>").description("Import auto-memory .md fi
   let errors = 0;
   const beliefStore2 = dryRun ? null : getBeliefStore();
   for (const file of files) {
-    const filePath = join5(resolvedDir, file);
+    const filePath = join4(resolvedDir, file);
     try {
       const content = readFileSync3(filePath, "utf-8");
       const { meta, body } = parseFrontmatter(content);
@@ -4124,15 +3886,15 @@ program2.command("setup").description("Set up memr in current project \u2014 ini
   getDatabase();
   closeDatabase();
   console.log(`   Created: ${dataDir}`);
-  const hooksDir = join5(projectDir, ".claude", "hooks");
+  const hooksDir = join4(projectDir, ".claude", "hooks");
   if (!existsSync3(hooksDir)) {
     mkdirSync3(hooksDir, { recursive: true });
   }
-  const hookPath = join5(hooksDir, "memr-session-start.sh");
+  const hookPath = join4(hooksDir, "memr-session-start.sh");
   console.log("2. Writing hook: .claude/hooks/memr-session-start.sh ...");
   writeFileSync3(hookPath, getEmbeddedHook(), { mode: 493 });
   console.log(`   Created: ${hookPath}`);
-  const settingsPath = join5(projectDir, ".claude", "settings.json");
+  const settingsPath = join4(projectDir, ".claude", "settings.json");
   console.log("3. Configuring .claude/settings.json ...");
   const memrHookEntry = {
     hooks: [
