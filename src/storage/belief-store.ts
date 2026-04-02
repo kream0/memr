@@ -771,7 +771,7 @@ export class BeliefStore {
       belief_type: row.belief_type as BeliefType,
       confidence: row.confidence,
       importance: row.importance as Importance,
-      tags: row.tags ? JSON.parse(row.tags) : [],
+      tags: row.tags ? (row.tags.startsWith('[') ? JSON.parse(row.tags) : [row.tags]) : [],
       project: row.project ?? undefined,
       stakeholder: row.stakeholder ?? undefined,
       verify_by: row.verify_by ?? undefined,
