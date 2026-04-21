@@ -33,7 +33,9 @@ export class BeliefStore {
   }
 
   create(input: NewBelief): Belief {
-    const domain = input.domain ?? autoDetectDomain(input.text);
+    const VALID_DOMAINS: BeliefDomain[] = ['handoff', 'watch', 'project', 'stakeholder', 'rule', 'pattern', 'infra', 'skill'];
+    const rawDomain = input.domain ?? autoDetectDomain(input.text);
+    const domain = VALID_DOMAINS.includes(rawDomain) ? rawDomain : autoDetectDomain(input.text);
     const beliefType = input.belief_type ?? autoDetectType(input.text, domain);
     const tags = input.tags ?? [];
     const importance = input.importance ?? computeImportance({ domain, belief_type: beliefType, text: input.text, tags });

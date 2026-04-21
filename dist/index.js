@@ -2076,7 +2076,7 @@ function migrateV1toV2(database) {
 
         derived_at INTEGER NOT NULL,
         last_evaluated INTEGER NOT NULL,
-        supersedes_id TEXT REFERENCES beliefs(id),
+        supersedes_id TEXT REFERENCES beliefs_v2(id),
         invalidated_at INTEGER,
         invalidation_reason TEXT,
         created_at INTEGER DEFAULT (strftime('%s','now') * 1000)
@@ -2238,6 +2238,68 @@ function rebuildFTS(database) {
     database.exec("INSERT INTO beliefs_fts(beliefs_fts) VALUES('rebuild')");
   } catch {}
 }
+function hasBrokenSupersedesFK(database) {
+  try {
+    const row = database.query(`SELECT "table" as target FROM pragma_foreign_key_list('beliefs') WHERE "from" = 'supersedes_id'`).get();
+    return row !== null && row.target !== "beliefs";
+  } catch {
+    return false;
+  }
+}
+function repairSupersedesFK(database) {
+  const run = (sql) => database.exec(sql);
+  run("PRAGMA foreign_keys = OFF");
+  run("BEGIN TRANSACTION");
+  try {
+    run("DROP TRIGGER IF EXISTS beliefs_ai");
+    run("DROP TRIGGER IF EXISTS beliefs_ad");
+    run("DROP TRIGGER IF EXISTS beliefs_au");
+    run(`
+      CREATE TABLE beliefs_fixed (
+        id TEXT PRIMARY KEY,
+        text TEXT NOT NULL CHECK(length(text) <= 500),
+        domain TEXT NOT NULL CHECK(domain IN (
+          'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
+        )),
+        belief_type TEXT NOT NULL DEFAULT 'fact' CHECK(belief_type IN (
+          'directive','fact','handoff','watch','decision','pending'
+        )),
+        confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+        importance INTEGER NOT NULL DEFAULT 3 CHECK(importance >= 1 AND importance <= 5),
+        tags TEXT,
+
+        project TEXT,
+        stakeholder TEXT,
+        verify_by INTEGER,
+        expires_at INTEGER,
+        action TEXT,
+        source_session INTEGER,
+
+        derived_at INTEGER NOT NULL,
+        last_evaluated INTEGER NOT NULL,
+        supersedes_id TEXT REFERENCES beliefs_fixed(id),
+        invalidated_at INTEGER,
+        invalidation_reason TEXT,
+        created_at INTEGER DEFAULT (strftime('%s','now') * 1000)
+      )
+    `);
+    run(`
+      INSERT INTO beliefs_fixed
+      SELECT id, text, domain, belief_type, confidence, importance, tags,
+             project, stakeholder, verify_by, expires_at, action, source_session,
+             derived_at, last_evaluated, supersedes_id, invalidated_at, invalidation_reason, created_at
+      FROM beliefs
+    `);
+    run("DROP TABLE beliefs");
+    run("ALTER TABLE beliefs_fixed RENAME TO beliefs");
+    run("DROP TABLE IF EXISTS beliefs_fts");
+    run("COMMIT");
+  } catch (e) {
+    run("ROLLBACK");
+    throw e;
+  }
+  run("PRAGMA foreign_keys = ON");
+}
 function initializeSchema(database) {
   if (isV1Schema(database)) {
     migrateV1toV2(database);
@@ -2246,9 +2308,17 @@ function initializeSchema(database) {
     createTriggers(database);
     rebuildFTS(database);
   } else if (isV2Schema(database)) {
-    createIndexes(database);
-    createFTS(database);
-    createTriggers(database);
+    if (hasBrokenSupersedesFK(database)) {
+      repairSupersedesFK(database);
+      createIndexes(database);
+      createFTS(database);
+      createTriggers(database);
+      rebuildFTS(database);
+    } else {
+      createIndexes(database);
+      createFTS(database);
+      createTriggers(database);
+    }
   } else {
     createV2Schema(database);
     createIndexes(database);
@@ -2712,7 +2782,9 @@ class BeliefStore {
     return getDatabase();
   }
   create(input) {
-    const domain = input.domain ?? autoDetectDomain(input.text);
+    const VALID_DOMAINS = ["handoff", "watch", "project", "stakeholder", "rule", "pattern", "infra", "skill"];
+    const rawDomain = input.domain ?? autoDetectDomain(input.text);
+    const domain = VALID_DOMAINS.includes(rawDomain) ? rawDomain : autoDetectDomain(input.text);
     const beliefType = input.belief_type ?? autoDetectType(input.text, domain);
     const tags = input.tags ?? [];
     const importance = input.importance ?? computeImportance({ domain, belief_type: beliefType, text: input.text, tags });
@@ -3480,7 +3552,13 @@ Beliefs by domain:`);
 });
 program2.command("remember <text>").description("Quick belief add \u2014 auto-detects domain from content").option("-d, --domain <domain>", "Override auto-detected domain").option("-t, --type <type>", "Override auto-detected type").option("-p, --project <name>", "Associate with project").option("-s, --stakeholder <name>", "Associate with stakeholder").option("--tags <tags>", "Comma-separated tags").action((text, options) => {
   const beliefStore2 = getBeliefStore();
-  const domain = options.domain || autoDetectDomain2(text);
+  let domain;
+  if (options.domain && !VALID_DOMAINS.includes(options.domain)) {
+    console.warn(`Warning: invalid domain "${options.domain}", falling back to auto-detect.`);
+    domain = autoDetectDomain2(text);
+  } else {
+    domain = options.domain || autoDetectDomain2(text);
+  }
   const belief = beliefStore2.create({
     text,
     domain,
@@ -3558,6 +3636,10 @@ program2.command("verify <id>").description("Mark a watch belief as verified").a
   closeDatabase();
 });
 program2.command("add-belief").description("Add a belief with explicit control over all fields").requiredOption("-t, --text <text>", "Belief text").requiredOption("-d, --domain <domain>", `Domain: ${VALID_DOMAINS.join(", ")}`).option("-c, --confidence <n>", "Confidence 0-1", "0.7").option("-i, --importance <n>", "Importance 1-5", "3").option("--type <type>", `Belief type: ${VALID_TYPES.join(", ")}`).option("--tags <tags>", "Comma-separated tags").option("-p, --project <name>", "Project name").option("-s, --stakeholder <name>", "Stakeholder name").action((options) => {
+  if (!VALID_DOMAINS.includes(options.domain)) {
+    console.error(`Invalid domain "${options.domain}". Valid: ${VALID_DOMAINS.join(", ")}`);
+    process.exit(1);
+  }
   const beliefStore2 = getBeliefStore();
   const belief = beliefStore2.create({
     text: options.text,

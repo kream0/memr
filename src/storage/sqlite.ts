@@ -68,7 +68,7 @@ function migrateV1toV2(database: Database): void {
 
         derived_at INTEGER NOT NULL,
         last_evaluated INTEGER NOT NULL,
-        supersedes_id TEXT REFERENCES beliefs(id),
+        supersedes_id TEXT REFERENCES beliefs_v2(id),
         invalidated_at INTEGER,
         invalidation_reason TEXT,
         created_at INTEGER DEFAULT (strftime('%s','now') * 1000)
@@ -286,6 +286,76 @@ function rebuildFTS(database: Database): void {
   }
 }
 
+function hasBrokenSupersedesFK(database: Database): boolean {
+  try {
+    const row = database.query(
+      `SELECT "table" as target FROM pragma_foreign_key_list('beliefs') WHERE "from" = 'supersedes_id'`
+    ).get() as { target: string } | null;
+    return row !== null && row.target !== 'beliefs';
+  } catch {
+    return false;
+  }
+}
+
+function repairSupersedesFK(database: Database): void {
+  const run = (sql: string) => database.exec(sql);
+  run('PRAGMA foreign_keys = OFF');
+  run('BEGIN TRANSACTION');
+  try {
+    run('DROP TRIGGER IF EXISTS beliefs_ai');
+    run('DROP TRIGGER IF EXISTS beliefs_ad');
+    run('DROP TRIGGER IF EXISTS beliefs_au');
+
+    run(`
+      CREATE TABLE beliefs_fixed (
+        id TEXT PRIMARY KEY,
+        text TEXT NOT NULL CHECK(length(text) <= 500),
+        domain TEXT NOT NULL CHECK(domain IN (
+          'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
+        )),
+        belief_type TEXT NOT NULL DEFAULT 'fact' CHECK(belief_type IN (
+          'directive','fact','handoff','watch','decision','pending'
+        )),
+        confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+        importance INTEGER NOT NULL DEFAULT 3 CHECK(importance >= 1 AND importance <= 5),
+        tags TEXT,
+
+        project TEXT,
+        stakeholder TEXT,
+        verify_by INTEGER,
+        expires_at INTEGER,
+        action TEXT,
+        source_session INTEGER,
+
+        derived_at INTEGER NOT NULL,
+        last_evaluated INTEGER NOT NULL,
+        supersedes_id TEXT REFERENCES beliefs_fixed(id),
+        invalidated_at INTEGER,
+        invalidation_reason TEXT,
+        created_at INTEGER DEFAULT (strftime('%s','now') * 1000)
+      )
+    `);
+
+    run(`
+      INSERT INTO beliefs_fixed
+      SELECT id, text, domain, belief_type, confidence, importance, tags,
+             project, stakeholder, verify_by, expires_at, action, source_session,
+             derived_at, last_evaluated, supersedes_id, invalidated_at, invalidation_reason, created_at
+      FROM beliefs
+    `);
+
+    run('DROP TABLE beliefs');
+    run('ALTER TABLE beliefs_fixed RENAME TO beliefs');
+    run('DROP TABLE IF EXISTS beliefs_fts');
+
+    run('COMMIT');
+  } catch (e) {
+    run('ROLLBACK');
+    throw e;
+  }
+  run('PRAGMA foreign_keys = ON');
+}
+
 function initializeSchema(database: Database): void {
   if (isV1Schema(database)) {
     // Migrate from v1 to v2
@@ -295,10 +365,18 @@ function initializeSchema(database: Database): void {
     createTriggers(database);
     rebuildFTS(database);
   } else if (isV2Schema(database)) {
-    // Already v2 -- ensure indexes, FTS, and triggers are present
-    createIndexes(database);
-    createFTS(database);
-    createTriggers(database);
+    // Already v2 -- repair FK if broken by old migration bug, then ensure indexes/FTS/triggers
+    if (hasBrokenSupersedesFK(database)) {
+      repairSupersedesFK(database);
+      createIndexes(database);
+      createFTS(database);
+      createTriggers(database);
+      rebuildFTS(database);
+    } else {
+      createIndexes(database);
+      createFTS(database);
+      createTriggers(database);
+    }
   } else {
     // Fresh database -- create everything
     createV2Schema(database);

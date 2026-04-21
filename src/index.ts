@@ -73,7 +73,13 @@ program
   .action((text: string, options) => {
     const beliefStore = getBeliefStore();
 
-    const domain = (options.domain as BeliefDomain) || autoDetectDomain(text);
+    let domain: BeliefDomain;
+    if (options.domain && !VALID_DOMAINS.includes(options.domain as BeliefDomain)) {
+      console.warn(`Warning: invalid domain "${options.domain}", falling back to auto-detect.`);
+      domain = autoDetectDomain(text);
+    } else {
+      domain = (options.domain as BeliefDomain) || autoDetectDomain(text);
+    }
 
     const belief = beliefStore.create({
       text,
@@ -210,6 +216,11 @@ program
   .option('-p, --project <name>', 'Project name')
   .option('-s, --stakeholder <name>', 'Stakeholder name')
   .action((options) => {
+    if (!VALID_DOMAINS.includes(options.domain as BeliefDomain)) {
+      console.error(`Invalid domain "${options.domain}". Valid: ${VALID_DOMAINS.join(', ')}`);
+      process.exit(1);
+    }
+
     const beliefStore = getBeliefStore();
 
     const belief = beliefStore.create({
