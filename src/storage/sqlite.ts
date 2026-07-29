@@ -2,6 +2,51 @@ import { Database } from 'bun:sqlite';
 import { join } from 'path';
 import { ensureDataDir } from '../utils/config.js';
 
+/**
+ * Maximum length of `beliefs.text`. Enforced by a SQLite CHECK constraint on
+ * every schema path below — fresh (createV2Schema), migrated (migrateV1toV2)
+ * and repaired (repairSupersedesFK) tables — so all three stay in step.
+ *
+ * The CHECK is the last line of defence, not the first: it fires inside the
+ * INSERT, which in BeliefStore happens *after* older beliefs have been
+ * superseded. Callers must therefore call assertBeliefTextLength() before doing
+ * any destructive work. See BeliefStore.create().
+ */
+export const MAX_BELIEF_TEXT_LENGTH = 500;
+
+/**
+ * Length as SQLite's `length()` counts it: code points, not UTF-16 code units.
+ * `'x'.length` would over-count astral characters (an emoji is 2 units but 1
+ * code point) and reject text the CHECK would have accepted.
+ */
+export function beliefTextLength(text: string): number {
+  return [...text].length;
+}
+
+/** Thrown when belief text exceeds the limit. Signals that nothing was written. */
+export class BeliefTextTooLongError extends Error {
+  readonly actualLength: number;
+
+  constructor(actualLength: number) {
+    super(
+      // Keep this ASCII-only. The bundler emits a `// @bun` pragma that makes the
+      // runtime read dist/index.js as latin-1, so raw non-ASCII in a template
+      // literal reaches the terminal double-encoded.
+      `belief text is ${actualLength} characters, which exceeds the ${MAX_BELIEF_TEXT_LENGTH}-character limit ` +
+        `by ${actualLength - MAX_BELIEF_TEXT_LENGTH}. Nothing was modified. Shorten the text and retry.`
+    );
+    this.name = 'BeliefTextTooLongError';
+    this.actualLength = actualLength;
+  }
+}
+
+export function assertBeliefTextLength(text: string): void {
+  const length = beliefTextLength(text);
+  if (length > MAX_BELIEF_TEXT_LENGTH) {
+    throw new BeliefTextTooLongError(length);
+  }
+}
+
 let db: Database | null = null;
 
 export function getDatabase(projectDir?: string): Database {
@@ -48,7 +93,7 @@ function migrateV1toV2(database: Database): void {
     database.exec(`
       CREATE TABLE beliefs_v2 (
         id TEXT PRIMARY KEY,
-        text TEXT NOT NULL CHECK(length(text) <= 500),
+        text TEXT NOT NULL CHECK(length(text) <= ${MAX_BELIEF_TEXT_LENGTH}),
         domain TEXT NOT NULL CHECK(domain IN (
           'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
         )),
@@ -196,7 +241,7 @@ function createV2Schema(database: Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS beliefs (
       id TEXT PRIMARY KEY,
-      text TEXT NOT NULL CHECK(length(text) <= 500),
+      text TEXT NOT NULL CHECK(length(text) <= ${MAX_BELIEF_TEXT_LENGTH}),
       domain TEXT NOT NULL CHECK(domain IN (
         'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
       )),
@@ -309,7 +354,7 @@ function repairSupersedesFK(database: Database): void {
     run(`
       CREATE TABLE beliefs_fixed (
         id TEXT PRIMARY KEY,
-        text TEXT NOT NULL CHECK(length(text) <= 500),
+        text TEXT NOT NULL CHECK(length(text) <= ${MAX_BELIEF_TEXT_LENGTH}),
         domain TEXT NOT NULL CHECK(domain IN (
           'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
         )),

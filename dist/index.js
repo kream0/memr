@@ -2022,6 +2022,25 @@ function ensureDataDir2(projectDir) {
 }
 
 // src/storage/sqlite.ts
+var MAX_BELIEF_TEXT_LENGTH = 500;
+function beliefTextLength(text) {
+  return [...text].length;
+}
+
+class BeliefTextTooLongError extends Error {
+  actualLength;
+  constructor(actualLength) {
+    super(`belief text is ${actualLength} characters, which exceeds the ${MAX_BELIEF_TEXT_LENGTH}-character limit ` + `by ${actualLength - MAX_BELIEF_TEXT_LENGTH}. Nothing was modified. Shorten the text and retry.`);
+    this.name = "BeliefTextTooLongError";
+    this.actualLength = actualLength;
+  }
+}
+function assertBeliefTextLength(text) {
+  const length = beliefTextLength(text);
+  if (length > MAX_BELIEF_TEXT_LENGTH) {
+    throw new BeliefTextTooLongError(length);
+  }
+}
 var db = null;
 function getDatabase(projectDir) {
   if (db)
@@ -2056,7 +2075,7 @@ function migrateV1toV2(database) {
     database.exec(`
       CREATE TABLE beliefs_v2 (
         id TEXT PRIMARY KEY,
-        text TEXT NOT NULL CHECK(length(text) <= 500),
+        text TEXT NOT NULL CHECK(length(text) <= ${MAX_BELIEF_TEXT_LENGTH}),
         domain TEXT NOT NULL CHECK(domain IN (
           'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
         )),
@@ -2160,7 +2179,7 @@ function createV2Schema(database) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS beliefs (
       id TEXT PRIMARY KEY,
-      text TEXT NOT NULL CHECK(length(text) <= 500),
+      text TEXT NOT NULL CHECK(length(text) <= ${MAX_BELIEF_TEXT_LENGTH}),
       domain TEXT NOT NULL CHECK(domain IN (
         'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
       )),
@@ -2257,7 +2276,7 @@ function repairSupersedesFK(database) {
     run(`
       CREATE TABLE beliefs_fixed (
         id TEXT PRIMARY KEY,
-        text TEXT NOT NULL CHECK(length(text) <= 500),
+        text TEXT NOT NULL CHECK(length(text) <= ${MAX_BELIEF_TEXT_LENGTH}),
         domain TEXT NOT NULL CHECK(domain IN (
           'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
         )),
@@ -2782,6 +2801,10 @@ class BeliefStore {
     return getDatabase();
   }
   create(input) {
+    assertBeliefTextLength(input.text);
+    return this.db.transaction(() => this.insertWithSupersede(input))();
+  }
+  insertWithSupersede(input) {
     const VALID_DOMAINS = ["handoff", "watch", "project", "stakeholder", "rule", "pattern", "infra", "skill"];
     const rawDomain = input.domain ?? autoDetectDomain(input.text);
     const domain = VALID_DOMAINS.includes(rawDomain) ? rawDomain : autoDetectDomain(input.text);
@@ -3109,21 +3132,24 @@ class BeliefStore {
     return stats;
   }
   createHandoff(text, sessionNumber) {
-    const activeHandoffs = this.getActive({ domain: "handoff" });
-    for (const h of activeHandoffs) {
-      this.invalidate(h.id, "Superseded by new handoff");
-    }
+    assertBeliefTextLength(text);
     const twoDays = 2 * 24 * 60 * 60 * 1000;
-    return this.create({
-      text,
-      domain: "handoff",
-      belief_type: "handoff",
-      confidence: 1,
-      importance: 5,
-      expires_at: Date.now() + twoDays,
-      source_session: sessionNumber,
-      tags: ["handoff"]
-    });
+    return this.db.transaction(() => {
+      const activeHandoffs = this.getActive({ domain: "handoff" });
+      for (const h of activeHandoffs) {
+        this.invalidate(h.id, "Superseded by new handoff");
+      }
+      return this.create({
+        text,
+        domain: "handoff",
+        belief_type: "handoff",
+        confidence: 1,
+        importance: 5,
+        expires_at: Date.now() + twoDays,
+        source_session: sessionNumber,
+        tags: ["handoff"]
+      });
+    })();
   }
   curate(dryRun = false) {
     const stats = { expired: 0, decayed: 0, merged: 0, capped: 0, invalidated: 0, resolved: 0 };
@@ -4031,4 +4057,26 @@ program2.command("setup").description("Set up memr in current project \u2014 ini
   console.log("  bash .claude/hooks/memr-session-start.sh | jq .");
   console.log("  mem-reason status");
 });
-program2.parse();
+function isSQLiteError(err) {
+  if (!(err instanceof Error))
+    return false;
+  const code = err.code;
+  return err.name === "SQLiteError" || typeof code === "string" && code.startsWith("SQLITE_");
+}
+try {
+  program2.parse();
+} catch (err) {
+  if (err instanceof BeliefTextTooLongError) {
+    console.error(`Error: ${err.message}`);
+  } else if (isSQLiteError(err)) {
+    console.error(`Error: the belief store rejected this write: ${err.message}`);
+    console.error("Nothing was modified.");
+  } else {
+    throw err;
+  }
+  closeDatabase();
+  process.exit(1);
+}
+
+//# debugId=0587E2C2ECABF78664756E2164756E21
+//# sourceMappingURL=index.js.map

@@ -5,7 +5,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 
 import { join, basename } from 'path';
 
 import { ensureDataDir, loadConfig } from './utils/config.js';
-import { getBeliefStore, getDatabase, closeDatabase } from './storage/belief-store.js';
+import { getBeliefStore, getDatabase, closeDatabase, BeliefTextTooLongError } from './storage/belief-store.js';
 import { autoDetectDomain } from './utils/scoring.js';
 import type { BeliefDomain, BeliefType, Importance } from './types.js';
 import { DOMAIN_LIFECYCLES } from './types.js';
@@ -720,4 +720,35 @@ program
     console.log('  mem-reason status');
   });
 
-program.parse();
+/**
+ * Commander runs these actions synchronously, so anything they throw surfaces
+ * here. Without this boundary a rejected write escaped as an uncaught
+ * SQLiteError and printed a raw Bun stack trace that named neither the
+ * constraint that failed nor the offending value.
+ *
+ * Writes are transactional (see BeliefStore.create), so a store that rejects
+ * input has not modified anything.
+ */
+function isSQLiteError(err: unknown): err is Error & { code?: string } {
+  // bun:sqlite errors report constructor.name === 'Error'; the usable markers
+  // are the `name` property and a SQLITE_-prefixed `code`.
+  if (!(err instanceof Error)) return false;
+  const code = (err as { code?: unknown }).code;
+  return err.name === 'SQLiteError' || (typeof code === 'string' && code.startsWith('SQLITE_'));
+}
+
+try {
+  program.parse();
+} catch (err) {
+  if (err instanceof BeliefTextTooLongError) {
+    console.error(`Error: ${err.message}`);
+  } else if (isSQLiteError(err)) {
+    console.error(`Error: the belief store rejected this write: ${err.message}`);
+    console.error('Nothing was modified.');
+  } else {
+    throw err;
+  }
+
+  closeDatabase();
+  process.exit(1);
+}

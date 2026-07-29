@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { getDatabase } from './sqlite.js';
+import { getDatabase, assertBeliefTextLength } from './sqlite.js';
 import type { Belief, BeliefDomain, BeliefType, Importance, SearchOptions, NewBelief, ScoredBelief, ContextOptions } from '../types.js';
 import { DOMAIN_LIFECYCLES } from '../types.js';
 import { computeImportance, autoDetectDomain, autoDetectType, computeContextScore, jaccardSimilarity, expandQuery, areContradictory } from '../utils/scoring.js';
@@ -33,6 +33,19 @@ export class BeliefStore {
   }
 
   create(input: NewBelief): Belief {
+    // Validate BEFORE any destructive work. insertWithSupersede() invalidates
+    // pending and contradicted beliefs on its way to the INSERT; letting the
+    // schema CHECK reject the text down there would leave those beliefs
+    // invalidated with no replacement — the belief is simply lost.
+    assertBeliefTextLength(input.text);
+
+    // Supersede + insert are one unit. Any failure past this point (the other
+    // CHECK constraints, FK violations) rolls back every invalidate() and every
+    // merge() performed on the way in.
+    return this.db.transaction(() => this.insertWithSupersede(input))();
+  }
+
+  private insertWithSupersede(input: NewBelief): Belief {
     const VALID_DOMAINS: BeliefDomain[] = ['handoff', 'watch', 'project', 'stakeholder', 'rule', 'pattern', 'infra', 'skill'];
     const rawDomain = input.domain ?? autoDetectDomain(input.text);
     const domain = VALID_DOMAINS.includes(rawDomain) ? rawDomain : autoDetectDomain(input.text);
@@ -454,24 +467,33 @@ export class BeliefStore {
   }
 
   createHandoff(text: string, sessionNumber?: number): Belief {
-    // Invalidate ALL existing active handoff beliefs
-    const activeHandoffs = this.getActive({ domain: 'handoff' });
-    for (const h of activeHandoffs) {
-      this.invalidate(h.id, 'Superseded by new handoff');
-    }
+    // Validate before the invalidate loop below. A too-long handoff that got as
+    // far as the loop would supersede the previous handoff and then fail to
+    // insert its replacement, leaving the next session with no continuity.
+    assertBeliefTextLength(text);
 
     const twoDays = 2 * 24 * 60 * 60 * 1000;
 
-    return this.create({
-      text,
-      domain: 'handoff',
-      belief_type: 'handoff',
-      confidence: 1.0,
-      importance: 5 as Importance,
-      expires_at: Date.now() + twoDays,
-      source_session: sessionNumber,
-      tags: ['handoff'],
-    });
+    // Supersede + create are one unit: if create() fails, the previous handoffs
+    // are restored. (Nested inside create()'s own transaction as a savepoint.)
+    return this.db.transaction(() => {
+      // Invalidate ALL existing active handoff beliefs
+      const activeHandoffs = this.getActive({ domain: 'handoff' });
+      for (const h of activeHandoffs) {
+        this.invalidate(h.id, 'Superseded by new handoff');
+      }
+
+      return this.create({
+        text,
+        domain: 'handoff',
+        belief_type: 'handoff',
+        confidence: 1.0,
+        importance: 5 as Importance,
+        expires_at: Date.now() + twoDays,
+        source_session: sessionNumber,
+        tags: ['handoff'],
+      });
+    })();
   }
 
   curate(dryRun: boolean = false): { expired: number; decayed: number; merged: number; capped: number; invalidated: number; resolved: number } {
@@ -805,4 +827,4 @@ export function resetBeliefStore(): void {
 
 // Re-export database functions so index.ts doesn't import sqlite.ts directly.
 // This prevents bun's bundler from duplicating the sqlite module (and its db singleton).
-export { getDatabase, closeDatabase } from './sqlite.js';
+export { getDatabase, closeDatabase, BeliefTextTooLongError, MAX_BELIEF_TEXT_LENGTH } from './sqlite.js';
