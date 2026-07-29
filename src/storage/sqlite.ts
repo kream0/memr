@@ -57,6 +57,16 @@ export function getDatabase(projectDir?: string): Database {
 
   db = new Database(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
+  // busy_timeout: block up to 5s waiting for a locked DB instead of failing
+  // immediately. Without this, bun:sqlite defaults to 0 and any two concurrent
+  // writers race; the loser returns SQLITE_BUSY, callers often catch and drop
+  // the write silently. With WAL + this timeout, serialization is transparent.
+  db.exec('PRAGMA busy_timeout = 5000');
+  // synchronous=NORMAL: fsync at commit + WAL checkpoint boundaries (not every
+  // page write). Combined with WAL, this is the recommended durability level —
+  // it prevents the partial-page-flush class of corruption that has repeatedly
+  // truncated project .memorai/memory.db files under abrupt session shutdown.
+  db.exec('PRAGMA synchronous = NORMAL');
   db.exec('PRAGMA foreign_keys = ON');
 
   initializeSchema(db);

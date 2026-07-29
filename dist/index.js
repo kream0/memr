@@ -2049,6 +2049,8 @@ function getDatabase(projectDir) {
   const dbPath = join3(dataDir, "memory.db");
   db = new Database(dbPath);
   db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA busy_timeout = 5000");
+  db.exec("PRAGMA synchronous = NORMAL");
   db.exec("PRAGMA foreign_keys = ON");
   initializeSchema(db);
   return db;
@@ -4078,5 +4080,5 @@ try {
   process.exit(1);
 }
 
-//# debugId=0587E2C2ECABF78664756E2164756E21
+//# debugId=1A48AA1ABD89219464756E2164756E21
 //# sourceMappingURL=index.js.map
