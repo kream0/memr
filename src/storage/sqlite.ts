@@ -3,16 +3,65 @@ import { join } from 'path';
 import { ensureDataDir } from '../utils/config.js';
 
 /**
- * Maximum length of `beliefs.text`. Enforced by a SQLite CHECK constraint on
- * every schema path below — fresh (createV2Schema), migrated (migrateV1toV2)
- * and repaired (repairSupersedesFK) tables — so all three stay in step.
+ * Maximum length of `beliefs.text` for ordinary beliefs.
+ *
+ * This number is an editorial rule, not an external constraint: nothing in the
+ * storage layer needs it (SQLite TEXT is unbounded, and v2 has no embeddings).
+ * It exists to keep beliefs atomic, because every active belief competes for
+ * the same context token budget at injection time (~len/4 + 15 tokens each,
+ * against a default budget of 8000). Beliefs that ramble crowd out beliefs that
+ * matter, so ordinary writes stay strict and fail loudly.
+ */
+export const MAX_BELIEF_TEXT_LENGTH = 500;
+
+/**
+ * Maximum length of `beliefs.text` for the `handoff` domain.
+ *
+ * Handoffs are the one domain where the reasoning above does not apply, so they
+ * get their own ceiling:
+ *   - only ever ONE is active (createHandoff supersedes all previous handoffs),
+ *     so a long one crowds out nothing;
+ *   - they expire after 2 days (DOMAIN_LIFECYCLES.handoff.ttlDays), so a long
+ *     one is not a permanent tax;
+ *   - they are written at end of session, under context pressure, when a hard
+ *     rejection costs a full extra round trip — the friction this limit is
+ *     meant to remove.
+ *
+ * 2000 chars is ~515 tokens, i.e. ~6% of the default context budget for the
+ * single active handoff, and ~3x the length that was being hit in practice.
+ * Past this the CLI trims rather than rejects; see utils/handoff-text.ts.
+ */
+export const MAX_HANDOFF_TEXT_LENGTH = 2000;
+
+/** The text-length ceiling that applies to a given domain. */
+export function limitForDomain(domain?: string): number {
+  return domain === 'handoff' ? MAX_HANDOFF_TEXT_LENGTH : MAX_BELIEF_TEXT_LENGTH;
+}
+
+/**
+ * The `beliefs.text` CHECK, shared by every schema path below — fresh
+ * (createV2Schema), migrated (migrateV1toV2) and rebuilt (repairSupersedesFK,
+ * migrateTextCheck) tables — so all of them stay in step.
+ *
+ * A column CHECK may read any column of the row it validates, so the ceiling is
+ * chosen per row from `domain` and the DB stays the last line of defence for
+ * both limits rather than deferring one of them to application code.
  *
  * The CHECK is the last line of defence, not the first: it fires inside the
  * INSERT, which in BeliefStore happens *after* older beliefs have been
  * superseded. Callers must therefore call assertBeliefTextLength() before doing
  * any destructive work. See BeliefStore.create().
  */
-export const MAX_BELIEF_TEXT_LENGTH = 500;
+const TEXT_LENGTH_CHECK =
+  `CHECK(length(text) <= CASE domain WHEN 'handoff' ` +
+  `THEN ${MAX_HANDOFF_TEXT_LENGTH} ELSE ${MAX_BELIEF_TEXT_LENGTH} END)`;
+
+/**
+ * Substring identifying the domain-aware CHECK in `sqlite_master.sql`. A table
+ * whose stored DDL lacks it predates the per-domain ceiling and is rebuilt by
+ * migrateTextCheck().
+ */
+const TEXT_CHECK_MARKER = `CASE domain WHEN 'handoff'`;
 
 /**
  * Length as SQLite's `length()` counts it: code points, not UTF-16 code units.
@@ -26,24 +75,32 @@ export function beliefTextLength(text: string): number {
 /** Thrown when belief text exceeds the limit. Signals that nothing was written. */
 export class BeliefTextTooLongError extends Error {
   readonly actualLength: number;
+  readonly limit: number;
 
-  constructor(actualLength: number) {
+  constructor(actualLength: number, limit: number = MAX_BELIEF_TEXT_LENGTH) {
     super(
       // Keep this ASCII-only. The bundler emits a `// @bun` pragma that makes the
       // runtime read dist/index.js as latin-1, so raw non-ASCII in a template
       // literal reaches the terminal double-encoded.
-      `belief text is ${actualLength} characters, which exceeds the ${MAX_BELIEF_TEXT_LENGTH}-character limit ` +
-        `by ${actualLength - MAX_BELIEF_TEXT_LENGTH}. Nothing was modified. Shorten the text and retry.`
+      `belief text is ${actualLength} characters, which exceeds the ${limit}-character limit ` +
+        `by ${actualLength - limit}. Nothing was modified. Shorten the text and retry.`
     );
     this.name = 'BeliefTextTooLongError';
     this.actualLength = actualLength;
+    this.limit = limit;
   }
 }
 
-export function assertBeliefTextLength(text: string): void {
+/**
+ * Rejects text too long for `domain`. The domain must be the one the row will
+ * actually be inserted with, or this validates against a different ceiling than
+ * the CHECK will — see BeliefStore.resolveDomain().
+ */
+export function assertBeliefTextLength(text: string, domain?: string): void {
   const length = beliefTextLength(text);
-  if (length > MAX_BELIEF_TEXT_LENGTH) {
-    throw new BeliefTextTooLongError(length);
+  const limit = limitForDomain(domain);
+  if (length > limit) {
+    throw new BeliefTextTooLongError(length, limit);
   }
 }
 
@@ -103,7 +160,7 @@ function migrateV1toV2(database: Database): void {
     database.exec(`
       CREATE TABLE beliefs_v2 (
         id TEXT PRIMARY KEY,
-        text TEXT NOT NULL CHECK(length(text) <= ${MAX_BELIEF_TEXT_LENGTH}),
+        text TEXT NOT NULL ${TEXT_LENGTH_CHECK},
         domain TEXT NOT NULL CHECK(domain IN (
           'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
         )),
@@ -158,7 +215,13 @@ function migrateV1toV2(database: Database): void {
     for (const row of oldRows) {
       const { newDomain, newType } = reclassify(row.domain, row.text);
       const clampedImportance = Math.max(1, Math.min(5, row.importance ?? 3));
-      const truncatedText = row.text.length > 500 ? row.text.slice(0, 497) + '...' : row.text;
+      // Ceiling depends on the domain the row is being reclassified INTO, and is
+      // measured the way the CHECK measures it (code points, not UTF-16 units).
+      const limit = limitForDomain(newDomain);
+      const truncatedText =
+        beliefTextLength(row.text) > limit
+          ? [...row.text].slice(0, limit - 3).join('') + '...'
+          : row.text;
 
       insert.run(
         row.id,
@@ -251,7 +314,7 @@ function createV2Schema(database: Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS beliefs (
       id TEXT PRIMARY KEY,
-      text TEXT NOT NULL CHECK(length(text) <= ${MAX_BELIEF_TEXT_LENGTH}),
+      text TEXT NOT NULL ${TEXT_LENGTH_CHECK},
       domain TEXT NOT NULL CHECK(domain IN (
         'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
       )),
@@ -364,7 +427,7 @@ function repairSupersedesFK(database: Database): void {
     run(`
       CREATE TABLE beliefs_fixed (
         id TEXT PRIMARY KEY,
-        text TEXT NOT NULL CHECK(length(text) <= ${MAX_BELIEF_TEXT_LENGTH}),
+        text TEXT NOT NULL ${TEXT_LENGTH_CHECK},
         domain TEXT NOT NULL CHECK(domain IN (
           'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
         )),
@@ -411,6 +474,91 @@ function repairSupersedesFK(database: Database): void {
   run('PRAGMA foreign_keys = ON');
 }
 
+/**
+ * True when `beliefs` still carries a flat `CHECK(length(text) <= N)` instead of
+ * the domain-aware one, i.e. the table was created before handoffs got their own
+ * ceiling.
+ */
+function needsTextCheckMigration(database: Database): boolean {
+  try {
+    const row = database.query(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'beliefs'`
+    ).get() as { sql: string | null } | null;
+    if (!row?.sql) return false;
+    return !row.sql.includes(TEXT_CHECK_MARKER);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rebuilds `beliefs` so its text CHECK becomes domain-aware. A CHECK cannot be
+ * altered in place, so this is the standard table-rebuild dance, same shape as
+ * repairSupersedesFK().
+ *
+ * Widening only: the new ceiling is >= the old one for every domain, so no
+ * existing row can fail the copy. Rows are moved verbatim — this migration
+ * never rewrites belief text.
+ */
+function migrateTextCheck(database: Database): void {
+  const run = (sql: string) => database.exec(sql);
+  run('PRAGMA foreign_keys = OFF');
+  run('BEGIN TRANSACTION');
+  try {
+    run('DROP TRIGGER IF EXISTS beliefs_ai');
+    run('DROP TRIGGER IF EXISTS beliefs_ad');
+    run('DROP TRIGGER IF EXISTS beliefs_au');
+
+    run(`
+      CREATE TABLE beliefs_relimited (
+        id TEXT PRIMARY KEY,
+        text TEXT NOT NULL ${TEXT_LENGTH_CHECK},
+        domain TEXT NOT NULL CHECK(domain IN (
+          'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
+        )),
+        belief_type TEXT NOT NULL DEFAULT 'fact' CHECK(belief_type IN (
+          'directive','fact','handoff','watch','decision','pending'
+        )),
+        confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+        importance INTEGER NOT NULL DEFAULT 3 CHECK(importance >= 1 AND importance <= 5),
+        tags TEXT,
+
+        project TEXT,
+        stakeholder TEXT,
+        verify_by INTEGER,
+        expires_at INTEGER,
+        action TEXT,
+        source_session INTEGER,
+
+        derived_at INTEGER NOT NULL,
+        last_evaluated INTEGER NOT NULL,
+        supersedes_id TEXT REFERENCES beliefs_relimited(id),
+        invalidated_at INTEGER,
+        invalidation_reason TEXT,
+        created_at INTEGER DEFAULT (strftime('%s','now') * 1000)
+      )
+    `);
+
+    run(`
+      INSERT INTO beliefs_relimited
+      SELECT id, text, domain, belief_type, confidence, importance, tags,
+             project, stakeholder, verify_by, expires_at, action, source_session,
+             derived_at, last_evaluated, supersedes_id, invalidated_at, invalidation_reason, created_at
+      FROM beliefs
+    `);
+
+    run('DROP TABLE beliefs');
+    run('ALTER TABLE beliefs_relimited RENAME TO beliefs');
+    run('DROP TABLE IF EXISTS beliefs_fts');
+
+    run('COMMIT');
+  } catch (e) {
+    run('ROLLBACK');
+    throw e;
+  }
+  run('PRAGMA foreign_keys = ON');
+}
+
 function initializeSchema(database: Database): void {
   if (isV1Schema(database)) {
     // Migrate from v1 to v2
@@ -420,18 +568,25 @@ function initializeSchema(database: Database): void {
     createTriggers(database);
     rebuildFTS(database);
   } else if (isV2Schema(database)) {
-    // Already v2 -- repair FK if broken by old migration bug, then ensure indexes/FTS/triggers
+    // Already v2 -- apply any pending table rebuilds, then ensure indexes/FTS/triggers.
+    // Both rebuilds recreate `beliefs` from TEXT_LENGTH_CHECK, so repairing the FK
+    // already brings the text CHECK forward; re-test rather than assume.
+    let rebuilt = false;
+
     if (hasBrokenSupersedesFK(database)) {
       repairSupersedesFK(database);
-      createIndexes(database);
-      createFTS(database);
-      createTriggers(database);
-      rebuildFTS(database);
-    } else {
-      createIndexes(database);
-      createFTS(database);
-      createTriggers(database);
+      rebuilt = true;
     }
+    if (needsTextCheckMigration(database)) {
+      migrateTextCheck(database);
+      rebuilt = true;
+    }
+
+    createIndexes(database);
+    createFTS(database);
+    createTriggers(database);
+    // A rebuild drops beliefs_fts; its contents must be reindexed from the table.
+    if (rebuilt) rebuildFTS(database);
   } else {
     // Fresh database -- create everything
     createV2Schema(database);

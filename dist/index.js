@@ -2023,22 +2023,31 @@ function ensureDataDir2(projectDir) {
 
 // src/storage/sqlite.ts
 var MAX_BELIEF_TEXT_LENGTH = 500;
+var MAX_HANDOFF_TEXT_LENGTH = 2000;
+function limitForDomain(domain) {
+  return domain === "handoff" ? MAX_HANDOFF_TEXT_LENGTH : MAX_BELIEF_TEXT_LENGTH;
+}
+var TEXT_LENGTH_CHECK = `CHECK(length(text) <= CASE domain WHEN 'handoff' ` + `THEN ${MAX_HANDOFF_TEXT_LENGTH} ELSE ${MAX_BELIEF_TEXT_LENGTH} END)`;
+var TEXT_CHECK_MARKER = `CASE domain WHEN 'handoff'`;
 function beliefTextLength(text) {
   return [...text].length;
 }
 
 class BeliefTextTooLongError extends Error {
   actualLength;
-  constructor(actualLength) {
-    super(`belief text is ${actualLength} characters, which exceeds the ${MAX_BELIEF_TEXT_LENGTH}-character limit ` + `by ${actualLength - MAX_BELIEF_TEXT_LENGTH}. Nothing was modified. Shorten the text and retry.`);
+  limit;
+  constructor(actualLength, limit = MAX_BELIEF_TEXT_LENGTH) {
+    super(`belief text is ${actualLength} characters, which exceeds the ${limit}-character limit ` + `by ${actualLength - limit}. Nothing was modified. Shorten the text and retry.`);
     this.name = "BeliefTextTooLongError";
     this.actualLength = actualLength;
+    this.limit = limit;
   }
 }
-function assertBeliefTextLength(text) {
+function assertBeliefTextLength(text, domain) {
   const length = beliefTextLength(text);
-  if (length > MAX_BELIEF_TEXT_LENGTH) {
-    throw new BeliefTextTooLongError(length);
+  const limit = limitForDomain(domain);
+  if (length > limit) {
+    throw new BeliefTextTooLongError(length, limit);
   }
 }
 var db = null;
@@ -2077,7 +2086,7 @@ function migrateV1toV2(database) {
     database.exec(`
       CREATE TABLE beliefs_v2 (
         id TEXT PRIMARY KEY,
-        text TEXT NOT NULL CHECK(length(text) <= ${MAX_BELIEF_TEXT_LENGTH}),
+        text TEXT NOT NULL ${TEXT_LENGTH_CHECK},
         domain TEXT NOT NULL CHECK(domain IN (
           'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
         )),
@@ -2113,7 +2122,8 @@ function migrateV1toV2(database) {
     for (const row of oldRows) {
       const { newDomain, newType } = reclassify(row.domain, row.text);
       const clampedImportance = Math.max(1, Math.min(5, row.importance ?? 3));
-      const truncatedText = row.text.length > 500 ? row.text.slice(0, 497) + "..." : row.text;
+      const limit = limitForDomain(newDomain);
+      const truncatedText = beliefTextLength(row.text) > limit ? [...row.text].slice(0, limit - 3).join("") + "..." : row.text;
       insert.run(row.id, truncatedText, newDomain, newType, row.confidence, clampedImportance, row.tags, row.derived_at, row.last_evaluated, row.supersedes_id, row.invalidated_at, row.invalidation_reason, row.created_at);
     }
     database.exec("DROP TRIGGER IF EXISTS beliefs_ai");
@@ -2181,7 +2191,7 @@ function createV2Schema(database) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS beliefs (
       id TEXT PRIMARY KEY,
-      text TEXT NOT NULL CHECK(length(text) <= ${MAX_BELIEF_TEXT_LENGTH}),
+      text TEXT NOT NULL ${TEXT_LENGTH_CHECK},
       domain TEXT NOT NULL CHECK(domain IN (
         'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
       )),
@@ -2278,7 +2288,7 @@ function repairSupersedesFK(database) {
     run(`
       CREATE TABLE beliefs_fixed (
         id TEXT PRIMARY KEY,
-        text TEXT NOT NULL CHECK(length(text) <= ${MAX_BELIEF_TEXT_LENGTH}),
+        text TEXT NOT NULL ${TEXT_LENGTH_CHECK},
         domain TEXT NOT NULL CHECK(domain IN (
           'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
         )),
@@ -2321,6 +2331,70 @@ function repairSupersedesFK(database) {
   }
   run("PRAGMA foreign_keys = ON");
 }
+function needsTextCheckMigration(database) {
+  try {
+    const row = database.query(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'beliefs'`).get();
+    if (!row?.sql)
+      return false;
+    return !row.sql.includes(TEXT_CHECK_MARKER);
+  } catch {
+    return false;
+  }
+}
+function migrateTextCheck(database) {
+  const run = (sql) => database.exec(sql);
+  run("PRAGMA foreign_keys = OFF");
+  run("BEGIN TRANSACTION");
+  try {
+    run("DROP TRIGGER IF EXISTS beliefs_ai");
+    run("DROP TRIGGER IF EXISTS beliefs_ad");
+    run("DROP TRIGGER IF EXISTS beliefs_au");
+    run(`
+      CREATE TABLE beliefs_relimited (
+        id TEXT PRIMARY KEY,
+        text TEXT NOT NULL ${TEXT_LENGTH_CHECK},
+        domain TEXT NOT NULL CHECK(domain IN (
+          'handoff','watch','project','stakeholder','rule','pattern','infra','skill'
+        )),
+        belief_type TEXT NOT NULL DEFAULT 'fact' CHECK(belief_type IN (
+          'directive','fact','handoff','watch','decision','pending'
+        )),
+        confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+        importance INTEGER NOT NULL DEFAULT 3 CHECK(importance >= 1 AND importance <= 5),
+        tags TEXT,
+
+        project TEXT,
+        stakeholder TEXT,
+        verify_by INTEGER,
+        expires_at INTEGER,
+        action TEXT,
+        source_session INTEGER,
+
+        derived_at INTEGER NOT NULL,
+        last_evaluated INTEGER NOT NULL,
+        supersedes_id TEXT REFERENCES beliefs_relimited(id),
+        invalidated_at INTEGER,
+        invalidation_reason TEXT,
+        created_at INTEGER DEFAULT (strftime('%s','now') * 1000)
+      )
+    `);
+    run(`
+      INSERT INTO beliefs_relimited
+      SELECT id, text, domain, belief_type, confidence, importance, tags,
+             project, stakeholder, verify_by, expires_at, action, source_session,
+             derived_at, last_evaluated, supersedes_id, invalidated_at, invalidation_reason, created_at
+      FROM beliefs
+    `);
+    run("DROP TABLE beliefs");
+    run("ALTER TABLE beliefs_relimited RENAME TO beliefs");
+    run("DROP TABLE IF EXISTS beliefs_fts");
+    run("COMMIT");
+  } catch (e) {
+    run("ROLLBACK");
+    throw e;
+  }
+  run("PRAGMA foreign_keys = ON");
+}
 function initializeSchema(database) {
   if (isV1Schema(database)) {
     migrateV1toV2(database);
@@ -2329,17 +2403,20 @@ function initializeSchema(database) {
     createTriggers(database);
     rebuildFTS(database);
   } else if (isV2Schema(database)) {
+    let rebuilt = false;
     if (hasBrokenSupersedesFK(database)) {
       repairSupersedesFK(database);
-      createIndexes(database);
-      createFTS(database);
-      createTriggers(database);
-      rebuildFTS(database);
-    } else {
-      createIndexes(database);
-      createFTS(database);
-      createTriggers(database);
+      rebuilt = true;
     }
+    if (needsTextCheckMigration(database)) {
+      migrateTextCheck(database);
+      rebuilt = true;
+    }
+    createIndexes(database);
+    createFTS(database);
+    createTriggers(database);
+    if (rebuilt)
+      rebuildFTS(database);
   } else {
     createV2Schema(database);
     createIndexes(database);
@@ -2802,14 +2879,17 @@ class BeliefStore {
   get db() {
     return getDatabase();
   }
+  resolveDomain(input) {
+    const VALID_DOMAINS = ["handoff", "watch", "project", "stakeholder", "rule", "pattern", "infra", "skill"];
+    const rawDomain = input.domain ?? autoDetectDomain(input.text);
+    return VALID_DOMAINS.includes(rawDomain) ? rawDomain : autoDetectDomain(input.text);
+  }
   create(input) {
-    assertBeliefTextLength(input.text);
+    assertBeliefTextLength(input.text, this.resolveDomain(input));
     return this.db.transaction(() => this.insertWithSupersede(input))();
   }
   insertWithSupersede(input) {
-    const VALID_DOMAINS = ["handoff", "watch", "project", "stakeholder", "rule", "pattern", "infra", "skill"];
-    const rawDomain = input.domain ?? autoDetectDomain(input.text);
-    const domain = VALID_DOMAINS.includes(rawDomain) ? rawDomain : autoDetectDomain(input.text);
+    const domain = this.resolveDomain(input);
     const beliefType = input.belief_type ?? autoDetectType(input.text, domain);
     const tags = input.tags ?? [];
     const importance = input.importance ?? computeImportance({ domain, belief_type: beliefType, text: input.text, tags });
@@ -3134,7 +3214,7 @@ class BeliefStore {
     return stats;
   }
   createHandoff(text, sessionNumber) {
-    assertBeliefTextLength(text);
+    assertBeliefTextLength(text, "handoff");
     const twoDays = 2 * 24 * 60 * 60 * 1000;
     return this.db.transaction(() => {
       const activeHandoffs = this.getActive({ domain: "handoff" });
@@ -3547,11 +3627,150 @@ var STOP_WORDS2 = new Set([
   "its"
 ]);
 
+// src/utils/handoff-text.ts
+var TRIM_MARKER = " ...";
+var MIN_BODY = 48;
+var SECTION_PRIORITY = [
+  { test: /^STATE/i, priority: 1 },
+  { test: /^NEXT/i, priority: 2 },
+  { test: /^BLOCK/i, priority: 3 }
+];
+var LABEL_SCAN = /\b(STATE|NEXT|BLOCKERS?)\s*:/gi;
+function priorityOf(label) {
+  for (const { test, priority } of SECTION_PRIORITY) {
+    if (test.test(label))
+      return priority;
+  }
+  return 0;
+}
+function splitTail(raw) {
+  const match = raw.match(/\s+$/);
+  if (!match)
+    return { body: raw, tail: "" };
+  return { body: raw.slice(0, match.index), tail: match[0] };
+}
+function parseSections(text) {
+  const marks = [];
+  LABEL_SCAN.lastIndex = 0;
+  for (let m = LABEL_SCAN.exec(text);m !== null; m = LABEL_SCAN.exec(text)) {
+    marks.push({ start: m.index, label: m[0] });
+  }
+  if (marks.length === 0) {
+    const { body, tail } = splitTail(text);
+    return [{ label: "", body, tail, priority: 0, dropped: 0 }];
+  }
+  const sections = [];
+  if (marks[0].start > 0) {
+    const { body, tail } = splitTail(text.slice(0, marks[0].start));
+    sections.push({ label: "", body, tail, priority: 0, dropped: 0 });
+  }
+  for (let i = 0;i < marks.length; i++) {
+    const mark = marks[i];
+    const end = i + 1 < marks.length ? marks[i + 1].start : text.length;
+    const raw = text.slice(mark.start + mark.label.length, end);
+    const { body, tail } = splitTail(raw);
+    sections.push({ label: mark.label, body, tail, priority: priorityOf(mark.label), dropped: 0 });
+  }
+  return sections;
+}
+function assemble(sections) {
+  return sections.map((s) => s.label + s.body + s.tail).join("");
+}
+function hardCut(text, max) {
+  if (max <= 0)
+    return "";
+  return [...text].slice(0, max).join("");
+}
+function cutAtWord(text, max) {
+  if (max <= 0)
+    return "";
+  if (text.length <= max)
+    return text;
+  const window = text.slice(0, max);
+  for (let i = window.length - 1;i >= 0; i--) {
+    if (/\s/.test(window[i])) {
+      const cut = window.slice(0, i).trimEnd();
+      if (cut.length > 0)
+        return cut;
+      break;
+    }
+  }
+  return hardCut(window, max).trimEnd();
+}
+function shrink(sections, max, floor) {
+  const order = [...sections].sort((a, b) => a.priority - b.priority);
+  for (const section of order) {
+    const overflow = assemble(sections).length - max;
+    if (overflow <= 0)
+      return;
+    const raw = section.body.endsWith(TRIM_MARKER) ? section.body.slice(0, -TRIM_MARKER.length) : section.body;
+    if (raw.length <= floor)
+      continue;
+    const target = Math.max(floor, section.body.length - overflow) - TRIM_MARKER.length;
+    const kept = cutAtWord(raw, target);
+    if (kept.length >= raw.length)
+      continue;
+    section.dropped += raw.length - kept.length;
+    section.body = kept + TRIM_MARKER;
+    if (section.tail === "" && sections.indexOf(section) < sections.length - 1) {
+      section.tail = " ";
+    }
+  }
+}
+function describeDrops(sections) {
+  const cut = sections.filter((s) => s.dropped > 0);
+  if (cut.length === 0)
+    return "";
+  return cut.map((s) => `${s.label.replace(/\s*:$/, "") || "preamble"} (-${s.dropped})`).join(", ");
+}
+function fitHandoffText(text) {
+  const originalLength = beliefTextLength(text);
+  if (originalLength <= MAX_BELIEF_TEXT_LENGTH) {
+    return { text, originalLength, droppedChars: 0, overSoftLimit: false, warnings: [] };
+  }
+  if (originalLength <= MAX_HANDOFF_TEXT_LENGTH) {
+    return {
+      text,
+      originalLength,
+      droppedChars: 0,
+      overSoftLimit: true,
+      warnings: [
+        `Notice: handoff is ${originalLength} characters, past the ${MAX_BELIEF_TEXT_LENGTH}-character ` + `guideline for beliefs. Stored in full, nothing was cut ` + `(handoffs may run to ${MAX_HANDOFF_TEXT_LENGTH}).`
+      ]
+    };
+  }
+  const sections = parseSections(text);
+  shrink(sections, MAX_HANDOFF_TEXT_LENGTH, MIN_BODY);
+  if (assemble(sections).length > MAX_HANDOFF_TEXT_LENGTH) {
+    shrink(sections, MAX_HANDOFF_TEXT_LENGTH, 0);
+  }
+  let fitted = assemble(sections);
+  let unattributed = 0;
+  if (beliefTextLength(fitted) > MAX_HANDOFF_TEXT_LENGTH) {
+    const before = beliefTextLength(fitted);
+    fitted = hardCut(fitted, MAX_HANDOFF_TEXT_LENGTH);
+    unattributed = before - beliefTextLength(fitted);
+  }
+  const droppedChars = sections.reduce((n, s) => n + s.dropped, 0) + unattributed;
+  const breakdown = describeDrops(sections);
+  return {
+    text: fitted,
+    originalLength,
+    droppedChars,
+    overSoftLimit: true,
+    warnings: [
+      `WARNING: handoff is ${originalLength} characters, over the ` + `${MAX_HANDOFF_TEXT_LENGTH}-character limit. It was TRIMMED to fit and stored; ` + `${droppedChars} characters were dropped.`,
+      breakdown ? `  Trimmed at word boundaries, least important section first: ${breakdown}.` : `  Trimmed at a word boundary.`,
+      `  Re-run with a shorter handoff if anything dropped still matters.`
+    ]
+  };
+}
+
 // src/index.ts
 var VALID_DOMAINS = ["handoff", "watch", "project", "stakeholder", "rule", "pattern", "infra", "skill"];
 var VALID_TYPES = ["directive", "fact", "handoff", "watch", "decision", "pending"];
 var program2 = new Command;
-program2.name("mem-reason").description("memr v2 \u2014 Belief-based persistent memory for Claude Code").version("2.0.0");
+program2.name("mem-reason").description("memr v2 \u2014 Belief-based persistent memory for Claude Code").version("0.4.0");
 program2.command("init").description("Initialize .memorai directory").action(() => {
   const dataDir = ensureDataDir();
   getDatabase();
@@ -3615,10 +3834,16 @@ program2.command("check <topic>").description("Quick lookup \u2014 top 3 beliefs
 program2.command("handoff <text>").description("Session handoff \u2014 auto-supersedes previous handoffs").option("-n, --session <n>", "Session number").action((text, options) => {
   const beliefStore2 = getBeliefStore();
   const sessionNumber = options.session ? parseInt(options.session, 10) : undefined;
+  const fitted = fitHandoffText(text);
+  for (const warning of fitted.warnings) {
+    process.stderr.write(warning + `
+`);
+  }
   const previousCount = beliefStore2.getActive({ domain: "handoff" }).length;
-  const belief = beliefStore2.createHandoff(text, sessionNumber);
+  const belief = beliefStore2.createHandoff(fitted.text, sessionNumber);
   const shortId = belief.id.slice(0, 8);
-  console.log(`Handoff saved: ${shortId} (${previousCount} previous handoffs superseded)`);
+  const stored = fitted.droppedChars > 0 ? `, ${fitted.droppedChars} chars trimmed` : "";
+  console.log(`Handoff saved: ${shortId} (${previousCount} previous handoffs superseded${stored})`);
   closeDatabase();
 });
 program2.command("curate").description("Auto-cleanup: decay, dedup, expire, cap").option("--dry-run", "Show what would change without modifying").action((options) => {
@@ -4080,5 +4305,5 @@ try {
   process.exit(1);
 }
 
-//# debugId=1A48AA1ABD89219464756E2164756E21
+//# debugId=B0D27EC0E13F1E3064756E2164756E21
 //# sourceMappingURL=index.js.map

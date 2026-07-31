@@ -32,12 +32,24 @@ export class BeliefStore {
     return getDatabase();
   }
 
+  /**
+   * The domain the row will actually be stored with. Shared by create() and
+   * insertWithSupersede() because the text-length ceiling is per-domain: if the
+   * two disagreed, create() would validate against one limit and the CHECK
+   * would enforce another.
+   */
+  private resolveDomain(input: NewBelief): BeliefDomain {
+    const VALID_DOMAINS: BeliefDomain[] = ['handoff', 'watch', 'project', 'stakeholder', 'rule', 'pattern', 'infra', 'skill'];
+    const rawDomain = input.domain ?? autoDetectDomain(input.text);
+    return VALID_DOMAINS.includes(rawDomain) ? rawDomain : autoDetectDomain(input.text);
+  }
+
   create(input: NewBelief): Belief {
     // Validate BEFORE any destructive work. insertWithSupersede() invalidates
     // pending and contradicted beliefs on its way to the INSERT; letting the
     // schema CHECK reject the text down there would leave those beliefs
     // invalidated with no replacement — the belief is simply lost.
-    assertBeliefTextLength(input.text);
+    assertBeliefTextLength(input.text, this.resolveDomain(input));
 
     // Supersede + insert are one unit. Any failure past this point (the other
     // CHECK constraints, FK violations) rolls back every invalidate() and every
@@ -46,9 +58,7 @@ export class BeliefStore {
   }
 
   private insertWithSupersede(input: NewBelief): Belief {
-    const VALID_DOMAINS: BeliefDomain[] = ['handoff', 'watch', 'project', 'stakeholder', 'rule', 'pattern', 'infra', 'skill'];
-    const rawDomain = input.domain ?? autoDetectDomain(input.text);
-    const domain = VALID_DOMAINS.includes(rawDomain) ? rawDomain : autoDetectDomain(input.text);
+    const domain = this.resolveDomain(input);
     const beliefType = input.belief_type ?? autoDetectType(input.text, domain);
     const tags = input.tags ?? [];
     const importance = input.importance ?? computeImportance({ domain, belief_type: beliefType, text: input.text, tags });
@@ -470,7 +480,12 @@ export class BeliefStore {
     // Validate before the invalidate loop below. A too-long handoff that got as
     // far as the loop would supersede the previous handoff and then fail to
     // insert its replacement, leaving the next session with no continuity.
-    assertBeliefTextLength(text);
+    //
+    // The CLI runs fitHandoffText() first, so in practice this passes; it stays
+    // because it is the guard that makes the destructive loop below safe, and
+    // callers that skip the fitting step must still not be able to wipe the
+    // previous handoff.
+    assertBeliefTextLength(text, 'handoff');
 
     const twoDays = 2 * 24 * 60 * 60 * 1000;
 
@@ -827,4 +842,11 @@ export function resetBeliefStore(): void {
 
 // Re-export database functions so index.ts doesn't import sqlite.ts directly.
 // This prevents bun's bundler from duplicating the sqlite module (and its db singleton).
-export { getDatabase, closeDatabase, BeliefTextTooLongError, MAX_BELIEF_TEXT_LENGTH } from './sqlite.js';
+export {
+  getDatabase,
+  closeDatabase,
+  BeliefTextTooLongError,
+  MAX_BELIEF_TEXT_LENGTH,
+  MAX_HANDOFF_TEXT_LENGTH,
+  limitForDomain,
+} from './sqlite.js';

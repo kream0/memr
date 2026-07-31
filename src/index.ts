@@ -7,6 +7,7 @@ import { join, basename } from 'path';
 import { ensureDataDir, loadConfig } from './utils/config.js';
 import { getBeliefStore, getDatabase, closeDatabase, BeliefTextTooLongError } from './storage/belief-store.js';
 import { autoDetectDomain } from './utils/scoring.js';
+import { fitHandoffText } from './utils/handoff-text.js';
 import type { BeliefDomain, BeliefType, Importance } from './types.js';
 import { DOMAIN_LIFECYCLES } from './types.js';
 
@@ -18,7 +19,9 @@ const program = new Command();
 program
   .name('mem-reason')
   .description('memr v2 — Belief-based persistent memory for Claude Code')
-  .version('2.0.0');
+  // Keep in step with package.json "version". ("v2" in the description is the
+  // belief-model generation, not this number.)
+  .version('0.4.0');
 
 // ── init ──────────────────────────────────────────────────────────────────────
 program
@@ -126,13 +129,26 @@ program
     const beliefStore = getBeliefStore();
     const sessionNumber = options.session ? parseInt(options.session, 10) : undefined;
 
+    // Fit BEFORE touching the store. A handoff is written at the end of a
+    // session, where a hard rejection costs a whole round trip to rewrite, so
+    // over-long text is stored (in full where possible, trimmed where not)
+    // rather than refused. Doing it here, outside the transaction, also means
+    // the write below can no longer fail on length.
+    const fitted = fitHandoffText(text);
+    for (const warning of fitted.warnings) {
+      process.stderr.write(warning + '\n');
+    }
+
     // Count existing handoffs before creating new one (createHandoff auto-supersedes)
     const previousCount = beliefStore.getActive({ domain: 'handoff' as BeliefDomain }).length;
 
-    const belief = beliefStore.createHandoff(text, sessionNumber);
+    const belief = beliefStore.createHandoff(fitted.text, sessionNumber);
 
     const shortId = belief.id.slice(0, 8);
-    console.log(`Handoff saved: ${shortId} (${previousCount} previous handoffs superseded)`);
+    const stored = fitted.droppedChars > 0 ? `, ${fitted.droppedChars} chars trimmed` : '';
+    console.log(
+      `Handoff saved: ${shortId} (${previousCount} previous handoffs superseded${stored})`
+    );
     closeDatabase();
   });
 

@@ -113,6 +113,29 @@ mem-reason add-belief -t <text> -d <domain> [options]
 | `-e, --evidence <ids>` | Comma-separated supporting event IDs |
 | `--tags <tags>` | Comma-separated tags |
 
+### Text length limits
+
+Belief text is capped by a SQLite `CHECK` on `beliefs.text`, chosen per row from
+the belief's domain:
+
+| Domain | Limit | Over the limit |
+|--------|-------|----------------|
+| `handoff` | 2000 chars | Accepted. Stored in full past 500 with a notice on stderr; trimmed to fit past 2000, with a warning naming how many characters went and from which section |
+| everything else | 500 chars | Rejected, exit code 1, nothing written |
+
+The cap is an editorial rule, not a storage constraint: every active belief
+competes for the same context token budget at injection time, so beliefs that
+ramble crowd out beliefs that matter. Handoffs are exempted because only one is
+ever active (each supersedes the last), they expire after two days, and they are
+written at the end of a session where a rejection costs a full round trip to
+rewrite.
+
+Trimming a handoff shortens sections in increasing order of what they cost to
+lose — preamble, then `STATE`, then `NEXT`, then `BLOCKERS` — cutting at word
+boundaries and marking each cut with `...`, so the sections the next session
+cannot rediscover on its own survive. It is never silent: the character count
+dropped is always reported on stderr.
+
 ### `search`
 
 Search beliefs and events by keyword or semantic similarity.
