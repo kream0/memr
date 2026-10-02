@@ -6,29 +6,15 @@ var __getProtoOf = Object.getPrototypeOf;
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
-function __accessProp(key) {
-  return this[key];
-}
-var __toESMCache_node;
-var __toESMCache_esm;
 var __toESM = (mod, isNodeMode, target) => {
-  var canCache = mod != null && typeof mod === "object";
-  if (canCache) {
-    var cache = isNodeMode ? __toESMCache_node ??= new WeakMap : __toESMCache_esm ??= new WeakMap;
-    var cached = cache.get(mod);
-    if (cached)
-      return cached;
-  }
   target = mod != null ? __create(__getProtoOf(mod)) : {};
   const to = isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target;
   for (let key of __getOwnPropNames(mod))
     if (!__hasOwnProp.call(to, key))
       __defProp(to, key, {
-        get: __accessProp.bind(mod, key),
+        get: () => mod[key],
         enumerable: true
       });
-  if (canCache)
-    cache.set(mod, to);
   return to;
 };
 var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
@@ -1952,9 +1938,15 @@ function ensureDataDir(projectDir) {
   }
   return dataDir;
 }
-// node_modules/uuid/dist/esm/native.js
-import { randomUUID } from "crypto";
-var native_default = { randomUUID };
+
+// node_modules/uuid/dist/esm/stringify.js
+var byteToHex = [];
+for (let i = 0;i < 256; ++i) {
+  byteToHex.push((i + 256).toString(16).slice(1));
+}
+function unsafeStringify(arr, offset = 0) {
+  return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
+}
 
 // node_modules/uuid/dist/esm/rng.js
 import { randomFillSync } from "crypto";
@@ -1968,14 +1960,9 @@ function rng() {
   return rnds8Pool.slice(poolPtr, poolPtr += 16);
 }
 
-// node_modules/uuid/dist/esm/stringify.js
-var byteToHex = [];
-for (let i = 0;i < 256; ++i) {
-  byteToHex.push((i + 256).toString(16).slice(1));
-}
-function unsafeStringify(arr, offset = 0) {
-  return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
-}
+// node_modules/uuid/dist/esm/native.js
+import { randomUUID } from "crypto";
+var native_default = { randomUUID };
 
 // node_modules/uuid/dist/esm/v4.js
 function v4(options, buf, offset) {
@@ -2875,6 +2862,20 @@ function formatOrientOutput(beliefs, totalStored) {
 }
 
 // src/storage/belief-store.ts
+class SupersedesTargetError extends Error {
+  constructor(id, reason) {
+    super(`cannot supersede "${id}": ${reason}. Nothing was modified.`);
+    this.name = "SupersedesTargetError";
+  }
+}
+function snippet(text) {
+  return text.replace(/\s+/g, " ").slice(0, 80);
+}
+function contradictionWarning(candidate, newId) {
+  return `WARNING: possible contradiction (keyword match only, NOT invalidated): ` + `${candidate.id} [${candidate.domain}] "${snippet(candidate.text)}" -- ` + `if ${newId} really replaces it, run: ` + `mem-reason invalidate ${candidate.id} -r "superseded by ${newId}"
+`;
+}
+
 class BeliefStore {
   get db() {
     return getDatabase();
@@ -2886,6 +2887,9 @@ class BeliefStore {
   }
   create(input) {
     assertBeliefTextLength(input.text, this.resolveDomain(input));
+    if (input.supersedes_id !== undefined) {
+      this.assertSupersedable(input.supersedes_id);
+    }
     return this.db.transaction(() => this.insertWithSupersede(input))();
   }
   insertWithSupersede(input) {
@@ -2895,19 +2899,24 @@ class BeliefStore {
     const importance = input.importance ?? computeImportance({ domain, belief_type: beliefType, text: input.text, tags });
     const confidence = input.confidence ?? this.computeInitialConfidence(domain, beliefType);
     const now = Date.now();
-    const duplicate = this.findDuplicate(input.text, domain, 0.5);
+    const explicitTarget = input.supersedes_id ?? null;
+    const checkContradictions = domain !== "handoff";
+    const duplicate = explicitTarget ? null : this.findDuplicate(input.text, domain, 0.5);
     if (duplicate) {
-      if (domain !== "rule") {
+      if (domain !== "rule" && checkContradictions) {
         const rules = this.getActive({ domain: "rule" });
         for (const rule of rules) {
           if (areContradictory(input.text, rule.text)) {
-            process.stderr.write(`WARNING: Contradicts rule [${rule.id.slice(0, 8)}]: "${rule.text.slice(0, 80)}"
-`);
+            process.stderr.write(contradictionWarning(rule, duplicate.id));
             break;
           }
         }
       }
       return this.merge(duplicate, input);
+    }
+    const id = v4_default();
+    if (explicitTarget && !this.invalidate(explicitTarget, `Superseded by ${id}`)) {
+      throw new SupersedesTargetError(explicitTarget, "it is no longer active");
     }
     if (/\b(shipped|completed|done|delivered|implemented|finished)\b/i.test(input.text)) {
       const pendingBeliefs = this.getActive({ domain }).filter((b) => b.belief_type === "pending" && this.textsShareSubject(input.text, b.text));
@@ -2915,20 +2924,7 @@ class BeliefStore {
         this.invalidate(pending.id, "Superseded by shipped/completed version");
       }
     }
-    let supersedesId = input.supersedes_id ?? null;
-    const contradiction = this.findContradiction(input.text, domain);
-    if (contradiction) {
-      if (contradiction.isRule && domain !== "rule") {
-        process.stderr.write(`WARNING: Contradicts rule [${contradiction.belief.id.slice(0, 8)}]: "${contradiction.belief.text.slice(0, 80)}"
-`);
-      } else {
-        this.invalidate(contradiction.belief.id, `Contradicted by newer belief`);
-        supersedesId = contradiction.belief.id;
-        process.stderr.write(`SUPERSEDED: Old belief [${contradiction.belief.id.slice(0, 8)}] invalidated -- contradicted by this one
-`);
-      }
-    }
-    const id = v4_default();
+    const contradiction = checkContradictions ? this.findContradiction(input.text, domain) : null;
     const stmt = this.db.prepare(`
       INSERT INTO beliefs (
         id, text, domain, belief_type, confidence, importance, tags,
@@ -2937,7 +2933,10 @@ class BeliefStore {
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(id, input.text, domain, beliefType, confidence, importance, JSON.stringify(tags), input.project ?? null, input.stakeholder ?? null, input.verify_by ?? null, input.expires_at ?? null, input.action ?? null, input.source_session ?? null, now, now, supersedesId, null, null);
+    stmt.run(id, input.text, domain, beliefType, confidence, importance, JSON.stringify(tags), input.project ?? null, input.stakeholder ?? null, input.verify_by ?? null, input.expires_at ?? null, input.action ?? null, input.source_session ?? null, now, now, explicitTarget, null, null);
+    if (contradiction) {
+      process.stderr.write(contradictionWarning(contradiction, id));
+    }
     return {
       id,
       text: input.text,
@@ -2954,7 +2953,7 @@ class BeliefStore {
       source_session: input.source_session,
       derived_at: now,
       last_evaluated: now,
-      supersedes_id: supersedesId ?? undefined
+      supersedes_id: explicitTarget ?? undefined
     };
   }
   findDuplicate(text, domain, threshold) {
@@ -2978,7 +2977,7 @@ class BeliefStore {
     const actives = this.getActive({ domain });
     for (const belief of actives) {
       if (areContradictory(text, belief.text)) {
-        return { belief, isRule: domain === "rule" };
+        return belief;
       }
     }
     const allDomains = ["rule", "project", "infra", "pattern", "stakeholder", "watch", "skill", "handoff"];
@@ -2988,7 +2987,7 @@ class BeliefStore {
       const beliefs = this.getActive({ domain: crossDomain });
       for (const belief of beliefs) {
         if (areContradictory(text, belief.text)) {
-          return { belief, isRule: crossDomain === "rule" };
+          return belief;
         }
       }
     }
@@ -3017,6 +3016,25 @@ class BeliefStore {
     if (!row)
       return null;
     return this.rowToBelief(row);
+  }
+  findActiveByIdPrefix(prefix, limit = 5) {
+    if (!prefix)
+      return [];
+    const rows = this.db.prepare("SELECT * FROM beliefs WHERE substr(id, 1, length(?)) = ? AND invalidated_at IS NULL ORDER BY derived_at DESC LIMIT ?").all(prefix, prefix, limit);
+    return rows.map((row) => this.rowToBelief(row));
+  }
+  assertSupersedable(id) {
+    const target = this.getById(id);
+    if (target && !target.invalidated_at)
+      return;
+    if (target) {
+      throw new SupersedesTargetError(id, "it is already invalidated");
+    }
+    const matches = this.findActiveByIdPrefix(id);
+    if (matches.length > 0) {
+      throw new SupersedesTargetError(id, `no belief has that exact id (a full id is required); active ids starting with it: ${matches.map((b) => b.id).join(", ")}`);
+    }
+    throw new SupersedesTargetError(id, "no belief has that id");
   }
   getActive(options = {}) {
     let query = "SELECT * FROM beliefs WHERE invalidated_at IS NULL";
@@ -3234,7 +3252,7 @@ class BeliefStore {
     })();
   }
   curate(dryRun = false) {
-    const stats = { expired: 0, decayed: 0, merged: 0, capped: 0, invalidated: 0, resolved: 0 };
+    const stats = { expired: 0, decayed: 0, merged: 0, capped: 0, invalidated: 0, flagged: 0 };
     const allActive = this.getActive();
     for (const belief of allActive) {
       if (isExpired(belief)) {
@@ -3321,54 +3339,22 @@ class BeliefStore {
     const postInvalidate = dryRun ? postCap.filter((b) => b.confidence >= 0.2) : this.getActive();
     const contradictionPairs = this.findAllContradictions(postInvalidate);
     for (const [beliefA, beliefB] of contradictionPairs) {
-      stats.resolved++;
-      if (!dryRun) {
-        const winner = this.resolveContradiction(beliefA, beliefB);
-        const loser = winner.id === beliefA.id ? beliefB : beliefA;
-        this.invalidate(loser.id, `Contradicted by ${winner.id.slice(0, 8)} (auto-resolved by curate)`);
-      }
+      stats.flagged++;
+      process.stderr.write(`WARNING: possible contradiction (keyword match only, NOT invalidated): ` + `${beliefA.id} [${beliefA.domain}] "${snippet(beliefA.text)}" vs ` + `${beliefB.id} [${beliefB.domain}] "${snippet(beliefB.text)}"
+`);
     }
     return stats;
   }
   findAllContradictions(beliefs) {
     const pairs = [];
-    const resolved = new Set;
     for (let i = 0;i < beliefs.length; i++) {
-      if (resolved.has(beliefs[i].id))
-        continue;
       for (let j = i + 1;j < beliefs.length; j++) {
-        if (resolved.has(beliefs[j].id))
-          continue;
         if (areContradictory(beliefs[i].text, beliefs[j].text)) {
           pairs.push([beliefs[i], beliefs[j]]);
-          const winner = this.resolveContradiction(beliefs[i], beliefs[j]);
-          const loserId = winner.id === beliefs[i].id ? beliefs[j].id : beliefs[i].id;
-          resolved.add(loserId);
         }
       }
     }
     return pairs;
-  }
-  resolveContradiction(a, b) {
-    const aIsRule = a.domain === "rule" || a.belief_type === "directive";
-    const bIsRule = b.domain === "rule" || b.belief_type === "directive";
-    if (aIsRule && !bIsRule)
-      return a;
-    if (bIsRule && !aIsRule)
-      return b;
-    const aShipped = /\b(shipped|completed|done|delivered|implemented|finished)\b/i.test(a.text);
-    const bShipped = /\b(shipped|completed|done|delivered|implemented|finished)\b/i.test(b.text);
-    const aPending = /\b(pending|waiting|requested|needs)\b/i.test(a.text);
-    const bPending = /\b(pending|waiting|requested|needs)\b/i.test(b.text);
-    if (aShipped && bPending)
-      return a;
-    if (bShipped && aPending)
-      return b;
-    if (a.importance !== b.importance)
-      return a.importance > b.importance ? a : b;
-    if (Math.abs(a.confidence - b.confidence) > 0.05)
-      return a.confidence > b.confidence ? a : b;
-    return a.derived_at >= b.derived_at ? a : b;
   }
   countSharedSignificantWords(textA, textB) {
     const stopWords = new Set([
@@ -3770,7 +3756,7 @@ function fitHandoffText(text) {
 var VALID_DOMAINS = ["handoff", "watch", "project", "stakeholder", "rule", "pattern", "infra", "skill"];
 var VALID_TYPES = ["directive", "fact", "handoff", "watch", "decision", "pending"];
 var program2 = new Command;
-program2.name("mem-reason").description("memr v2 \u2014 Belief-based persistent memory for Claude Code").version("0.4.0");
+program2.name("mem-reason").description("memr v2 \u2014 Belief-based persistent memory for Claude Code").version("0.5.0");
 program2.command("init").description("Initialize .memorai directory").action(() => {
   const dataDir = ensureDataDir();
   getDatabase();
@@ -3850,8 +3836,7 @@ program2.command("curate").description("Auto-cleanup: decay, dedup, expire, cap"
   const beliefStore2 = getBeliefStore();
   const dryRun = !!options.dryRun;
   const stats = beliefStore2.curate(dryRun);
-  const resolved = stats.resolved ?? 0;
-  const total = stats.expired + stats.decayed + stats.merged + stats.capped + stats.invalidated + resolved;
+  const total = stats.expired + stats.decayed + stats.merged + stats.capped + stats.invalidated;
   const prefix = dryRun ? "[DRY RUN] " : "";
   console.log(`${prefix}Curate results:`);
   console.log(`  Expired:      ${stats.expired}`);
@@ -3859,7 +3844,7 @@ program2.command("curate").description("Auto-cleanup: decay, dedup, expire, cap"
   console.log(`  Merged:       ${stats.merged}`);
   console.log(`  Capped:       ${stats.capped}`);
   console.log(`  Invalidated:  ${stats.invalidated}`);
-  console.log(`  Resolved:     ${resolved}`);
+  console.log(`  Flagged:      ${stats.flagged} (possible contradictions, listed on stderr, not invalidated)`);
   console.log(`  Total:        ${total}`);
   closeDatabase();
 });
@@ -3888,7 +3873,7 @@ program2.command("verify <id>").description("Mark a watch belief as verified").a
   }
   closeDatabase();
 });
-program2.command("add-belief").description("Add a belief with explicit control over all fields").requiredOption("-t, --text <text>", "Belief text").requiredOption("-d, --domain <domain>", `Domain: ${VALID_DOMAINS.join(", ")}`).option("-c, --confidence <n>", "Confidence 0-1", "0.7").option("-i, --importance <n>", "Importance 1-5", "3").option("--type <type>", `Belief type: ${VALID_TYPES.join(", ")}`).option("--tags <tags>", "Comma-separated tags").option("-p, --project <name>", "Project name").option("-s, --stakeholder <name>", "Stakeholder name").action((options) => {
+program2.command("add-belief").description("Add a belief with explicit control over all fields").requiredOption("-t, --text <text>", "Belief text").requiredOption("-d, --domain <domain>", `Domain: ${VALID_DOMAINS.join(", ")}`).option("-c, --confidence <n>", "Confidence 0-1", "0.7").option("-i, --importance <n>", "Importance 1-5", "3").option("--type <type>", `Belief type: ${VALID_TYPES.join(", ")}`).option("--tags <tags>", "Comma-separated tags").option("-p, --project <name>", "Project name").option("-s, --stakeholder <name>", "Stakeholder name").option("--supersedes <id>", "Full id of the active belief this one replaces: it is invalidated and linked").action((options) => {
   if (!VALID_DOMAINS.includes(options.domain)) {
     console.error(`Invalid domain "${options.domain}". Valid: ${VALID_DOMAINS.join(", ")}`);
     process.exit(1);
@@ -3902,9 +3887,13 @@ program2.command("add-belief").description("Add a belief with explicit control o
     importance: parseInt(options.importance, 10),
     tags: options.tags ? options.tags.split(",") : [],
     project: options.project || undefined,
-    stakeholder: options.stakeholder || undefined
+    stakeholder: options.stakeholder || undefined,
+    supersedes_id: options.supersedes
   });
   console.log(`Added belief: ${belief.id}`);
+  if (belief.supersedes_id) {
+    console.log(`  Supersedes (invalidated): ${belief.supersedes_id}`);
+  }
   console.log(`  "${belief.text}"`);
   closeDatabase();
 });
@@ -3974,11 +3963,22 @@ program2.command("update-belief <id>").description("Update a belief").option("-c
 });
 program2.command("invalidate <id>").description("Invalidate a belief").requiredOption("-r, --reason <text>", "Reason for invalidation").action((id, options) => {
   const beliefStore2 = getBeliefStore();
-  const success = beliefStore2.invalidate(id, options.reason);
-  if (success) {
+  const belief = beliefStore2.getById(id);
+  if (!belief) {
+    console.error(`Belief not found: ${id}`);
+    const matches = beliefStore2.findActiveByIdPrefix(id);
+    if (matches.length > 0) {
+      console.error("A full id is required. Active ids starting with it:");
+      for (const m of matches)
+        console.error(`  ${m.id}`);
+    }
+    closeDatabase();
+    process.exit(1);
+  }
+  if (belief.invalidated_at) {
+    console.log(`Already invalidated: ${id}`);
+  } else if (beliefStore2.invalidate(id, options.reason)) {
     console.log(`Invalidated belief: ${id}`);
-  } else {
-    console.log(`Belief not found or already invalidated: ${id}`);
   }
   closeDatabase();
 });
@@ -4293,7 +4293,7 @@ function isSQLiteError(err) {
 try {
   program2.parse();
 } catch (err) {
-  if (err instanceof BeliefTextTooLongError) {
+  if (err instanceof BeliefTextTooLongError || err instanceof SupersedesTargetError) {
     console.error(`Error: ${err.message}`);
   } else if (isSQLiteError(err)) {
     console.error(`Error: the belief store rejected this write: ${err.message}`);
@@ -4305,5 +4305,5 @@ try {
   process.exit(1);
 }
 
-//# debugId=B0D27EC0E13F1E3064756E2164756E21
+//# debugId=6AA9419FC5DDD7E764756E2164756E21
 //# sourceMappingURL=index.js.map

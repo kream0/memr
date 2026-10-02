@@ -5,7 +5,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 
 import { join, basename } from 'path';
 
 import { ensureDataDir, loadConfig } from './utils/config.js';
-import { getBeliefStore, getDatabase, closeDatabase, BeliefTextTooLongError } from './storage/belief-store.js';
+import { getBeliefStore, getDatabase, closeDatabase, BeliefTextTooLongError, SupersedesTargetError } from './storage/belief-store.js';
 import { autoDetectDomain } from './utils/scoring.js';
 import { fitHandoffText } from './utils/handoff-text.js';
 import type { BeliefDomain, BeliefType, Importance } from './types.js';
@@ -21,7 +21,7 @@ program
   .description('memr v2 — Belief-based persistent memory for Claude Code')
   // Keep in step with package.json "version". ("v2" in the description is the
   // belief-model generation, not this number.)
-  .version('0.4.0');
+  .version('0.5.0');
 
 // ── init ──────────────────────────────────────────────────────────────────────
 program
@@ -162,8 +162,8 @@ program
     const dryRun = !!options.dryRun;
 
     const stats = beliefStore.curate(dryRun);
-    const resolved = (stats as any).resolved ?? 0;
-    const total = stats.expired + stats.decayed + stats.merged + stats.capped + stats.invalidated + resolved;
+    // Flagged pairs are reported on stderr and left alone, so they are not changes.
+    const total = stats.expired + stats.decayed + stats.merged + stats.capped + stats.invalidated;
 
     const prefix = dryRun ? '[DRY RUN] ' : '';
     console.log(`${prefix}Curate results:`);
@@ -172,7 +172,7 @@ program
     console.log(`  Merged:       ${stats.merged}`);
     console.log(`  Capped:       ${stats.capped}`);
     console.log(`  Invalidated:  ${stats.invalidated}`);
-    console.log(`  Resolved:     ${resolved}`);
+    console.log(`  Flagged:      ${stats.flagged} (possible contradictions, listed on stderr, not invalidated)`);
     console.log(`  Total:        ${total}`);
 
     closeDatabase();
@@ -231,6 +231,7 @@ program
   .option('--tags <tags>', 'Comma-separated tags')
   .option('-p, --project <name>', 'Project name')
   .option('-s, --stakeholder <name>', 'Stakeholder name')
+  .option('--supersedes <id>', 'Full id of the active belief this one replaces: it is invalidated and linked')
   .action((options) => {
     if (!VALID_DOMAINS.includes(options.domain as BeliefDomain)) {
       console.error(`Invalid domain "${options.domain}". Valid: ${VALID_DOMAINS.join(', ')}`);
@@ -248,9 +249,13 @@ program
       tags: options.tags ? options.tags.split(',') : [],
       project: options.project || undefined,
       stakeholder: options.stakeholder || undefined,
+      supersedes_id: options.supersedes,
     });
 
     console.log(`Added belief: ${belief.id}`);
+    if (belief.supersedes_id) {
+      console.log(`  Supersedes (invalidated): ${belief.supersedes_id}`);
+    }
     console.log(`  "${belief.text}"`);
     closeDatabase();
   });
@@ -355,13 +360,25 @@ program
   .requiredOption('-r, --reason <text>', 'Reason for invalidation')
   .action((id: string, options) => {
     const beliefStore = getBeliefStore();
+    const belief = beliefStore.getById(id);
 
-    const success = beliefStore.invalidate(id, options.reason);
+    if (!belief) {
+      // Ids match exactly. A short prefix used to print this and exit 0, so a
+      // script believed it had invalidated something.
+      console.error(`Belief not found: ${id}`);
+      const matches = beliefStore.findActiveByIdPrefix(id);
+      if (matches.length > 0) {
+        console.error('A full id is required. Active ids starting with it:');
+        for (const m of matches) console.error(`  ${m.id}`);
+      }
+      closeDatabase();
+      process.exit(1);
+    }
 
-    if (success) {
+    if (belief.invalidated_at) {
+      console.log(`Already invalidated: ${id}`);
+    } else if (beliefStore.invalidate(id, options.reason)) {
       console.log(`Invalidated belief: ${id}`);
-    } else {
-      console.log(`Belief not found or already invalidated: ${id}`);
     }
 
     closeDatabase();
@@ -756,7 +773,7 @@ function isSQLiteError(err: unknown): err is Error & { code?: string } {
 try {
   program.parse();
 } catch (err) {
-  if (err instanceof BeliefTextTooLongError) {
+  if (err instanceof BeliefTextTooLongError || err instanceof SupersedesTargetError) {
     console.error(`Error: ${err.message}`);
   } else if (isSQLiteError(err)) {
     console.error(`Error: the belief store rejected this write: ${err.message}`);

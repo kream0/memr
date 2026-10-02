@@ -112,6 +112,25 @@ mem-reason add-belief -t <text> -d <domain> [options]
 | `-i, --importance <n>` | Importance 1–10 (default: `5`) |
 | `-e, --evidence <ids>` | Comma-separated supporting event IDs |
 | `--tags <tags>` | Comma-separated tags |
+| `--supersedes <id>` | Full id of the active belief this one replaces. The target is invalidated and the new belief's `supersedes_id` points at it. A prefix, an unknown id or an already-invalidated id is refused (exit code 1, nothing written) |
+
+### Replacing a belief, and contradiction warnings
+
+The only way a new belief replaces an old one is `add-belief --supersedes <full-id>`
+(and `handoff`, which always replaces the previous handoff).
+
+On add, memr also runs a keyword test for a possible contradiction with any
+active belief, in any domain. That test is a guess: it fires on unrelated
+beliefs that share a few words and differ in negation. So it never invalidates
+anything. It prints one line on stderr and leaves both beliefs active:
+
+```
+WARNING: possible contradiction (keyword match only, NOT invalidated): <old-full-id> [<domain>] "<first 80 chars>" -- if <new-full-id> really replaces it, run: mem-reason invalidate <old-full-id> -r "superseded by <new-full-id>"
+```
+
+Handoffs skip the test. `curate` runs the same test across all active beliefs
+and only reports: one `WARNING: possible contradiction ... <id-a> [...] "..." vs <id-b> [...] "..."`
+line per pair on stderr, counted as `Flagged`, nothing invalidated.
 
 ### Text length limits
 
@@ -204,6 +223,10 @@ mem-reason invalidate <id> -r <reason>
 | Option | Description |
 |--------|-------------|
 | `-r, --reason <text>` | **Required.** Reason for invalidation |
+
+Ids match exactly. An id that matches no belief (a short prefix included) exits
+with code 1 and lists the active ids that start with it. An id that is already
+invalidated exits 0 and changes nothing.
 
 ### `reason`
 

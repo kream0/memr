@@ -27,6 +27,37 @@ interface BeliefRow {
   created_at: number;
 }
 
+/**
+ * Thrown when an explicit supersede names something other than the exact id of
+ * an active belief. Raised before any write, so nothing was modified.
+ */
+export class SupersedesTargetError extends Error {
+  constructor(id: string, reason: string) {
+    super(`cannot supersede "${id}": ${reason}. Nothing was modified.`);
+    this.name = 'SupersedesTargetError';
+  }
+}
+
+/** First 80 chars of a belief's text, flattened to one line for stderr. */
+function snippet(text: string): string {
+  return text.replace(/\s+/g, ' ').slice(0, 80);
+}
+
+/**
+ * areContradictory() is a keyword guess: it fires on unrelated pairs that share
+ * a couple of words and differ in negation. Acting on it invalidated unrelated
+ * beliefs (owner rules among them), so a hit is only reported. The full id is
+ * printed because the store matches ids exactly; a prefix finds nothing.
+ */
+function contradictionWarning(candidate: Belief, newId: string): string {
+  return (
+    `WARNING: possible contradiction (keyword match only, NOT invalidated): ` +
+    `${candidate.id} [${candidate.domain}] "${snippet(candidate.text)}" -- ` +
+    `if ${newId} really replaces it, run: ` +
+    `mem-reason invalidate ${candidate.id} -r "superseded by ${newId}"\n`
+  );
+}
+
 export class BeliefStore {
   private get db() {
     return getDatabase();
@@ -50,6 +81,9 @@ export class BeliefStore {
     // schema CHECK reject the text down there would leave those beliefs
     // invalidated with no replacement — the belief is simply lost.
     assertBeliefTextLength(input.text, this.resolveDomain(input));
+    if (input.supersedes_id !== undefined) {
+      this.assertSupersedable(input.supersedes_id);
+    }
 
     // Supersede + insert are one unit. Any failure past this point (the other
     // CHECK constraints, FK violations) rolls back every invalidate() and every
@@ -64,23 +98,38 @@ export class BeliefStore {
     const importance = input.importance ?? computeImportance({ domain, belief_type: beliefType, text: input.text, tags });
     const confidence = input.confidence ?? this.computeInitialConfidence(domain, beliefType);
     const now = Date.now();
+    const explicitTarget = input.supersedes_id ?? null;
+    // A handoff is session state, not a claim: a keyword hit against it means
+    // nothing, and the warning's ready-made invalidate command is bait for an
+    // unattended agent.
+    const checkContradictions = domain !== 'handoff';
 
-    // Duplicate detection: merge instead of creating a new belief
-    const duplicate = this.findDuplicate(input.text, domain, 0.5);
+    // Duplicate detection: merge instead of creating a new belief. Skipped for
+    // an explicit supersede, whose text is usually a rephrase of its target:
+    // merging would rewrite that row in place instead of replacing it.
+    const duplicate = explicitTarget ? null : this.findDuplicate(input.text, domain, 0.5);
     if (duplicate) {
       // Even when merging a duplicate, check cross-domain contradictions (e.g. dup project fact vs rule)
-      if (domain !== 'rule') {
+      if (domain !== 'rule' && checkContradictions) {
         const rules = this.getActive({ domain: 'rule' });
         for (const rule of rules) {
           if (areContradictory(input.text, rule.text)) {
-            process.stderr.write(
-              `WARNING: Contradicts rule [${rule.id.slice(0, 8)}]: "${rule.text.slice(0, 80)}"\n`
-            );
+            process.stderr.write(contradictionWarning(rule, duplicate.id));
             break;
           }
         }
       }
       return this.merge(duplicate, input);
+    }
+
+    const id = uuidv4();
+
+    // Explicit supersede: the caller named the belief this one replaces.
+    // create() checked it is active; only a concurrent write can make this
+    // fail, and throwing rolls the whole call back. Done before the pending
+    // sweep below, which could otherwise invalidate a pending target first.
+    if (explicitTarget && !this.invalidate(explicitTarget, `Superseded by ${id}`)) {
+      throw new SupersedesTargetError(explicitTarget, 'it is no longer active');
     }
 
     // Auto-supersede pending beliefs when shipped/completed version is stored
@@ -93,26 +142,10 @@ export class BeliefStore {
       }
     }
 
-    // Contradiction detection: check for conflicting beliefs before insert
-    let supersedesId = input.supersedes_id ?? null;
-    const contradiction = this.findContradiction(input.text, domain);
-    if (contradiction) {
-      if (contradiction.isRule && domain !== 'rule') {
-        // New fact contradicts an existing rule — warn but DON'T auto-invalidate the rule
-        process.stderr.write(
-          `WARNING: Contradicts rule [${contradiction.belief.id.slice(0, 8)}]: "${contradiction.belief.text.slice(0, 80)}"\n`
-        );
-      } else {
-        // Same-domain contradiction — auto-invalidate the old belief, new one supersedes
-        this.invalidate(contradiction.belief.id, `Contradicted by newer belief`);
-        supersedesId = contradiction.belief.id;
-        process.stderr.write(
-          `SUPERSEDED: Old belief [${contradiction.belief.id.slice(0, 8)}] invalidated -- contradicted by this one\n`
-        );
-      }
-    }
-
-    const id = uuidv4();
+    // Keyword contradiction check: reported after the insert, never acted on
+    // (see contradictionWarning). Runs after the explicit invalidate so the
+    // target is not reported against its own replacement.
+    const contradiction = checkContradictions ? this.findContradiction(input.text, domain) : null;
 
     const stmt = this.db.prepare(`
       INSERT INTO beliefs (
@@ -139,10 +172,14 @@ export class BeliefStore {
       input.source_session ?? null,
       now,
       now,
-      supersedesId,
+      explicitTarget,
       null,
       null
     );
+
+    if (contradiction) {
+      process.stderr.write(contradictionWarning(contradiction, id));
+    }
 
     return {
       id,
@@ -160,7 +197,7 @@ export class BeliefStore {
       source_session: input.source_session,
       derived_at: now,
       last_evaluated: now,
-      supersedes_id: supersedesId ?? undefined,
+      supersedes_id: explicitTarget ?? undefined,
     };
   }
 
@@ -183,23 +220,22 @@ export class BeliefStore {
     return null;
   }
 
-  findContradiction(text: string, domain: BeliefDomain): { belief: Belief; isRule: boolean } | null {
+  findContradiction(text: string, domain: BeliefDomain): Belief | null {
     // Check same-domain contradictions first
     const actives = this.getActive({ domain });
     for (const belief of actives) {
       if (areContradictory(text, belief.text)) {
-        return { belief, isRule: domain === 'rule' };
+        return belief;
       }
     }
     // Cross-domain: check new belief against ALL other domains
-    // Rules get special treatment (isRule flag affects resolution behavior in create())
     const allDomains: BeliefDomain[] = ['rule', 'project', 'infra', 'pattern', 'stakeholder', 'watch', 'skill', 'handoff'];
     for (const crossDomain of allDomains) {
       if (crossDomain === domain) continue; // already checked same-domain above
       const beliefs = this.getActive({ domain: crossDomain });
       for (const belief of beliefs) {
         if (areContradictory(text, belief.text)) {
-          return { belief, isRule: crossDomain === 'rule' };
+          return belief;
         }
       }
     }
@@ -231,6 +267,36 @@ export class BeliefStore {
     const row = stmt.get(id) as BeliefRow | null;
     if (!row) return null;
     return this.rowToBelief(row);
+  }
+
+  /** Active beliefs whose id starts with `prefix`, to point a caller at the full id. */
+  findActiveByIdPrefix(prefix: string, limit: number = 5): Belief[] {
+    if (!prefix) return [];
+    const rows = this.db.prepare(
+      'SELECT * FROM beliefs WHERE substr(id, 1, length(?)) = ? AND invalidated_at IS NULL ORDER BY derived_at DESC LIMIT ?'
+    ).all(prefix, prefix, limit) as BeliefRow[];
+    return rows.map(row => this.rowToBelief(row));
+  }
+
+  /**
+   * An explicit supersede must name the full id of an active belief. A prefix,
+   * a typo or an already-invalidated id is refused: guessing which belief was
+   * meant is how unrelated beliefs got invalidated.
+   */
+  private assertSupersedable(id: string): void {
+    const target = this.getById(id);
+    if (target && !target.invalidated_at) return;
+    if (target) {
+      throw new SupersedesTargetError(id, 'it is already invalidated');
+    }
+    const matches = this.findActiveByIdPrefix(id);
+    if (matches.length > 0) {
+      throw new SupersedesTargetError(
+        id,
+        `no belief has that exact id (a full id is required); active ids starting with it: ${matches.map(b => b.id).join(', ')}`
+      );
+    }
+    throw new SupersedesTargetError(id, 'no belief has that id');
   }
 
   getActive(options: SearchOptions = {}): Belief[] {
@@ -511,8 +577,8 @@ export class BeliefStore {
     })();
   }
 
-  curate(dryRun: boolean = false): { expired: number; decayed: number; merged: number; capped: number; invalidated: number; resolved: number } {
-    const stats = { expired: 0, decayed: 0, merged: 0, capped: 0, invalidated: 0, resolved: 0 };
+  curate(dryRun: boolean = false): { expired: number; decayed: number; merged: number; capped: number; invalidated: number; flagged: number } {
+    const stats = { expired: 0, decayed: 0, merged: 0, capped: 0, invalidated: 0, flagged: 0 };
     const allActive = this.getActive();
 
     // 1. Expire beliefs past expires_at
@@ -615,16 +681,18 @@ export class BeliefStore {
       }
     }
 
-    // 6. Resolve active contradictions
+    // 6. Report keyword contradictions. Report only: the keyword test pairs
+    // unrelated beliefs, and auto-resolving them invalidated the wrong ones.
+    // No invalidate command is printed here; a human picks which side, if any.
     const postInvalidate = dryRun ? postCap.filter(b => b.confidence >= 0.2) : this.getActive();
     const contradictionPairs = this.findAllContradictions(postInvalidate);
     for (const [beliefA, beliefB] of contradictionPairs) {
-      stats.resolved++;
-      if (!dryRun) {
-        const winner = this.resolveContradiction(beliefA, beliefB);
-        const loser = winner.id === beliefA.id ? beliefB : beliefA;
-        this.invalidate(loser.id, `Contradicted by ${winner.id.slice(0, 8)} (auto-resolved by curate)`);
-      }
+      stats.flagged++;
+      process.stderr.write(
+        `WARNING: possible contradiction (keyword match only, NOT invalidated): ` +
+        `${beliefA.id} [${beliefA.domain}] "${snippet(beliefA.text)}" vs ` +
+        `${beliefB.id} [${beliefB.domain}] "${snippet(beliefB.text)}"\n`
+      );
     }
 
     return stats;
@@ -634,48 +702,14 @@ export class BeliefStore {
 
   private findAllContradictions(beliefs: Belief[]): Array<[Belief, Belief]> {
     const pairs: Array<[Belief, Belief]> = [];
-    const resolved = new Set<string>();
-
     for (let i = 0; i < beliefs.length; i++) {
-      if (resolved.has(beliefs[i].id)) continue;
       for (let j = i + 1; j < beliefs.length; j++) {
-        if (resolved.has(beliefs[j].id)) continue;
         if (areContradictory(beliefs[i].text, beliefs[j].text)) {
           pairs.push([beliefs[i], beliefs[j]]);
-          // Mark the loser so we don't create overlapping pairs
-          const winner = this.resolveContradiction(beliefs[i], beliefs[j]);
-          const loserId = winner.id === beliefs[i].id ? beliefs[j].id : beliefs[i].id;
-          resolved.add(loserId);
         }
       }
     }
     return pairs;
-  }
-
-  private resolveContradiction(a: Belief, b: Belief): Belief {
-    // Priority hierarchy for who wins:
-    // 1. Rules/directives always win over facts
-    const aIsRule = a.domain === 'rule' || a.belief_type === 'directive';
-    const bIsRule = b.domain === 'rule' || b.belief_type === 'directive';
-    if (aIsRule && !bIsRule) return a;
-    if (bIsRule && !aIsRule) return b;
-
-    // 2. "Shipped/completed" wins over "pending"
-    const aShipped = /\b(shipped|completed|done|delivered|implemented|finished)\b/i.test(a.text);
-    const bShipped = /\b(shipped|completed|done|delivered|implemented|finished)\b/i.test(b.text);
-    const aPending = /\b(pending|waiting|requested|needs)\b/i.test(a.text);
-    const bPending = /\b(pending|waiting|requested|needs)\b/i.test(b.text);
-    if (aShipped && bPending) return a;
-    if (bShipped && aPending) return b;
-
-    // 3. Higher importance wins
-    if (a.importance !== b.importance) return a.importance > b.importance ? a : b;
-
-    // 4. Higher confidence wins
-    if (Math.abs(a.confidence - b.confidence) > 0.05) return a.confidence > b.confidence ? a : b;
-
-    // 5. Newer wins (tie-breaker)
-    return a.derived_at >= b.derived_at ? a : b;
   }
 
   private countSharedSignificantWords(textA: string, textB: string): number {
