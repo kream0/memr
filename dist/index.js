@@ -2871,8 +2871,8 @@ class SupersedesTargetError extends Error {
 function snippet(text) {
   return text.replace(/\s+/g, " ").slice(0, 80);
 }
-function contradictionWarning(candidate, newId) {
-  return `WARNING: possible contradiction (keyword match only, NOT invalidated): ` + `${candidate.id} [${candidate.domain}] "${snippet(candidate.text)}" -- ` + `if ${newId} really replaces it, run: ` + `mem-reason invalidate ${candidate.id} -r "superseded by ${newId}"
+function contradictionWarning(candidate) {
+  return `WARNING: possible contradiction (keyword match only, NOT invalidated): ` + `${candidate.id} [${candidate.domain}] "${snippet(candidate.text)}". ` + `Keyword matches are often unrelated: leave both as they are, ` + `unless you wrote this belief to replace that one.
 `;
 }
 
@@ -2907,7 +2907,7 @@ class BeliefStore {
         const rules = this.getActive({ domain: "rule" });
         for (const rule of rules) {
           if (areContradictory(input.text, rule.text)) {
-            process.stderr.write(contradictionWarning(rule, duplicate.id));
+            process.stderr.write(contradictionWarning(rule));
             break;
           }
         }
@@ -2935,7 +2935,7 @@ class BeliefStore {
     `);
     stmt.run(id, input.text, domain, beliefType, confidence, importance, JSON.stringify(tags), input.project ?? null, input.stakeholder ?? null, input.verify_by ?? null, input.expires_at ?? null, input.action ?? null, input.source_session ?? null, now, now, explicitTarget, null, null);
     if (contradiction) {
-      process.stderr.write(contradictionWarning(contradiction, id));
+      process.stderr.write(contradictionWarning(contradiction));
     }
     return {
       id,
@@ -3756,7 +3756,7 @@ function fitHandoffText(text) {
 var VALID_DOMAINS = ["handoff", "watch", "project", "stakeholder", "rule", "pattern", "infra", "skill"];
 var VALID_TYPES = ["directive", "fact", "handoff", "watch", "decision", "pending"];
 var program2 = new Command;
-program2.name("mem-reason").description("memr v2 \u2014 Belief-based persistent memory for Claude Code").version("0.5.0");
+program2.name("mem-reason").description("memr v2 \u2014 Belief-based persistent memory for Claude Code").version("0.5.1");
 program2.command("init").description("Initialize .memorai directory").action(() => {
   const dataDir = ensureDataDir();
   getDatabase();
@@ -3854,14 +3854,22 @@ program2.command("orient").description("Compact session-start context").action((
   console.log(output);
   closeDatabase();
 });
+function exitBeliefNotFound(beliefStore2, id) {
+  console.error(`Belief not found: ${id}`);
+  const matches = beliefStore2.findActiveByIdPrefix(id);
+  if (matches.length > 0) {
+    console.error("A full id is required. Active ids starting with it:");
+    for (const m of matches)
+      console.error(`  ${m.id}`);
+  }
+  closeDatabase();
+  process.exit(1);
+}
 program2.command("verify <id>").description("Mark a watch belief as verified").action((id) => {
   const beliefStore2 = getBeliefStore();
   const belief = beliefStore2.getById(id);
-  if (!belief) {
-    console.log(`Belief not found: ${id}`);
-    closeDatabase();
-    return;
-  }
+  if (!belief)
+    exitBeliefNotFound(beliefStore2, id);
   const newConf = Math.min(1, belief.confidence + 0.1);
   const updated = beliefStore2.update(id, {
     confidence: newConf,
@@ -3946,6 +3954,8 @@ program2.command("beliefs").description("List active beliefs").option("-d, --dom
 });
 program2.command("update-belief <id>").description("Update a belief").option("-c, --confidence <n>", "New confidence 0-1").option("-i, --importance <n>", "New importance 1-5").action((id, options) => {
   const beliefStore2 = getBeliefStore();
+  if (!beliefStore2.getById(id))
+    exitBeliefNotFound(beliefStore2, id);
   const changes = {};
   if (options.confidence)
     changes.confidence = parseFloat(options.confidence);
@@ -3956,25 +3966,14 @@ program2.command("update-belief <id>").description("Update a belief").option("-c
   if (updated) {
     console.log(`Updated belief: ${id}`);
     console.log(`  Confidence: ${(updated.confidence * 100).toFixed(0)}%`);
-  } else {
-    console.log(`Belief not found: ${id}`);
   }
   closeDatabase();
 });
 program2.command("invalidate <id>").description("Invalidate a belief").requiredOption("-r, --reason <text>", "Reason for invalidation").action((id, options) => {
   const beliefStore2 = getBeliefStore();
   const belief = beliefStore2.getById(id);
-  if (!belief) {
-    console.error(`Belief not found: ${id}`);
-    const matches = beliefStore2.findActiveByIdPrefix(id);
-    if (matches.length > 0) {
-      console.error("A full id is required. Active ids starting with it:");
-      for (const m of matches)
-        console.error(`  ${m.id}`);
-    }
-    closeDatabase();
-    process.exit(1);
-  }
+  if (!belief)
+    exitBeliefNotFound(beliefStore2, id);
   if (belief.invalidated_at) {
     console.log(`Already invalidated: ${id}`);
   } else if (beliefStore2.invalidate(id, options.reason)) {
@@ -4305,5 +4304,5 @@ try {
   process.exit(1);
 }
 
-//# debugId=6AA9419FC5DDD7E764756E2164756E21
+//# debugId=162F1056D194A37464756E2164756E21
 //# sourceMappingURL=index.js.map

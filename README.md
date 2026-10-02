@@ -125,8 +125,12 @@ beliefs that share a few words and differ in negation. So it never invalidates
 anything. It prints one line on stderr and leaves both beliefs active:
 
 ```
-WARNING: possible contradiction (keyword match only, NOT invalidated): <old-full-id> [<domain>] "<first 80 chars>" -- if <new-full-id> really replaces it, run: mem-reason invalidate <old-full-id> -r "superseded by <new-full-id>"
+WARNING: possible contradiction (keyword match only, NOT invalidated): <old-full-id> [<domain>] "<first 80 chars>". Keyword matches are often unrelated: leave both as they are, unless you wrote this belief to replace that one.
 ```
+
+The line carries no command to run: most hits are unrelated, and an unattended
+agent tends to run what it is shown. Hooks can detect this behaviour by the
+substring `keyword match only, NOT invalidated`.
 
 Handoffs skip the test. `curate` runs the same test across all active beliefs
 and only reports: one `WARNING: possible contradiction ... <id-a> [...] "..." vs <id-b> [...] "..."`
@@ -211,6 +215,10 @@ mem-reason update-belief <id> [options]
 | `-i, --importance <n>` | New importance (1–10) |
 | `--add-support` | Increment supporting evidence count |
 | `--add-contradict` | Increment contradicting evidence count |
+
+`update-belief` and `verify <id>` match ids exactly. An id that matches no
+belief exits with code 1, changes nothing, and lists the active ids that start
+with it.
 
 ### `invalidate`
 

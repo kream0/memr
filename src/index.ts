@@ -21,7 +21,7 @@ program
   .description('memr v2 — Belief-based persistent memory for Claude Code')
   // Keep in step with package.json "version". ("v2" in the description is the
   // belief-model generation, not this number.)
-  .version('0.5.0');
+  .version('0.5.1');
 
 // ── init ──────────────────────────────────────────────────────────────────────
 program
@@ -191,6 +191,22 @@ program
     closeDatabase();
   });
 
+/**
+ * Ids match exactly. A short prefix used to print "not found" and exit 0, so a
+ * script believed it had acted on a belief. Lists the active ids that start
+ * with the value, to help recover a truncated id.
+ */
+function exitBeliefNotFound(beliefStore: ReturnType<typeof getBeliefStore>, id: string): never {
+  console.error(`Belief not found: ${id}`);
+  const matches = beliefStore.findActiveByIdPrefix(id);
+  if (matches.length > 0) {
+    console.error('A full id is required. Active ids starting with it:');
+    for (const m of matches) console.error(`  ${m.id}`);
+  }
+  closeDatabase();
+  process.exit(1);
+}
+
 // ── verify ────────────────────────────────────────────────────────────────────
 program
   .command('verify <id>')
@@ -199,11 +215,7 @@ program
     const beliefStore = getBeliefStore();
     const belief = beliefStore.getById(id);
 
-    if (!belief) {
-      console.log(`Belief not found: ${id}`);
-      closeDatabase();
-      return;
-    }
+    if (!belief) exitBeliefNotFound(beliefStore, id);
 
     const newConf = Math.min(1.0, belief.confidence + 0.1);
     const updated = beliefStore.update(id, {
@@ -335,6 +347,7 @@ program
   .option('-i, --importance <n>', 'New importance 1-5')
   .action((id: string, options) => {
     const beliefStore = getBeliefStore();
+    if (!beliefStore.getById(id)) exitBeliefNotFound(beliefStore, id);
 
     const changes: Record<string, number> = {};
     if (options.confidence) changes.confidence = parseFloat(options.confidence);
@@ -346,8 +359,6 @@ program
     if (updated) {
       console.log(`Updated belief: ${id}`);
       console.log(`  Confidence: ${(updated.confidence * 100).toFixed(0)}%`);
-    } else {
-      console.log(`Belief not found: ${id}`);
     }
 
     closeDatabase();
@@ -362,18 +373,7 @@ program
     const beliefStore = getBeliefStore();
     const belief = beliefStore.getById(id);
 
-    if (!belief) {
-      // Ids match exactly. A short prefix used to print this and exit 0, so a
-      // script believed it had invalidated something.
-      console.error(`Belief not found: ${id}`);
-      const matches = beliefStore.findActiveByIdPrefix(id);
-      if (matches.length > 0) {
-        console.error('A full id is required. Active ids starting with it:');
-        for (const m of matches) console.error(`  ${m.id}`);
-      }
-      closeDatabase();
-      process.exit(1);
-    }
+    if (!belief) exitBeliefNotFound(beliefStore, id);
 
     if (belief.invalidated_at) {
       console.log(`Already invalidated: ${id}`);

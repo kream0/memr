@@ -48,13 +48,18 @@ function snippet(text: string): string {
  * a couple of words and differ in negation. Acting on it invalidated unrelated
  * beliefs (owner rules among them), so a hit is only reported. The full id is
  * printed because the store matches ids exactly; a prefix finds nothing.
+ *
+ * No runnable command: unattended agents run what they are shown, and most hits
+ * are unrelated, so a ready-made invalidate line would reproduce the loss by hand.
+ * Hooks detect warn-only memr by the "keyword match only, NOT invalidated"
+ * substring; keep it.
  */
-function contradictionWarning(candidate: Belief, newId: string): string {
+function contradictionWarning(candidate: Belief): string {
   return (
     `WARNING: possible contradiction (keyword match only, NOT invalidated): ` +
-    `${candidate.id} [${candidate.domain}] "${snippet(candidate.text)}" -- ` +
-    `if ${newId} really replaces it, run: ` +
-    `mem-reason invalidate ${candidate.id} -r "superseded by ${newId}"\n`
+    `${candidate.id} [${candidate.domain}] "${snippet(candidate.text)}". ` +
+    `Keyword matches are often unrelated: leave both as they are, ` +
+    `unless you wrote this belief to replace that one.\n`
   );
 }
 
@@ -100,8 +105,7 @@ export class BeliefStore {
     const now = Date.now();
     const explicitTarget = input.supersedes_id ?? null;
     // A handoff is session state, not a claim: a keyword hit against it means
-    // nothing, and the warning's ready-made invalidate command is bait for an
-    // unattended agent.
+    // nothing, and a warning about it is noise an unattended agent may act on.
     const checkContradictions = domain !== 'handoff';
 
     // Duplicate detection: merge instead of creating a new belief. Skipped for
@@ -114,7 +118,7 @@ export class BeliefStore {
         const rules = this.getActive({ domain: 'rule' });
         for (const rule of rules) {
           if (areContradictory(input.text, rule.text)) {
-            process.stderr.write(contradictionWarning(rule, duplicate.id));
+            process.stderr.write(contradictionWarning(rule));
             break;
           }
         }
@@ -178,7 +182,7 @@ export class BeliefStore {
     );
 
     if (contradiction) {
-      process.stderr.write(contradictionWarning(contradiction, id));
+      process.stderr.write(contradictionWarning(contradiction));
     }
 
     return {

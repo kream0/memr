@@ -140,7 +140,21 @@ const PAIRS = [
   },
 ];
 
-const WARNING = 'WARNING: possible contradiction (keyword match only, NOT invalidated)';
+// A dev hook detects warn-only memr by MARKER: it must stay verbatim.
+const MARKER = 'keyword match only, NOT invalidated';
+const WARNING = `WARNING: possible contradiction (${MARKER})`;
+const ADVICE = 'Keyword matches are often unrelated: leave both as they are, unless you wrote this belief to replace that one.';
+
+/**
+ * Unattended agents run the commands they are shown, and most keyword hits are
+ * unrelated, so the warning must not carry one: no invalidate, no supersede.
+ * ("NOT invalidated" in MARKER is not a word match for \binvalidate\b.)
+ */
+function expectNoCommand(stderr: string): void {
+  expect(stderr).not.toMatch(/\binvalidate\b/);
+  expect(stderr).not.toContain('mem-reason');
+  expect(stderr).not.toContain('--supersedes');
+}
 
 describe('add: a keyword contradiction warns and never invalidates', () => {
   for (const pair of PAIRS) {
@@ -159,11 +173,11 @@ describe('add: a keyword contradiction warns and never invalidates', () => {
       expect(row(cwd, newer.id).supersedes_id).toBeNull();
 
       // The warning names the candidate by FULL id (ids match exactly; a prefix
-      // finds nothing), its domain, and the exact command to act on it.
+      // finds nothing), its domain and text, and gives no command to run.
       const stderr = newer.result.stderr;
       expect(stderr).toContain(WARNING);
       expect(stderr).toContain(`${older.id} [${pair.older.domain}] "${pair.older.text.slice(0, 80)}"`);
-      expect(stderr).toContain(`mem-reason invalidate ${older.id} -r "superseded by ${newer.id}"`);
+      expectNoCommand(stderr);
       expect(stderr).not.toContain('SUPERSEDED');
     });
   }
@@ -178,6 +192,38 @@ describe('add: a keyword contradiction warns and never invalidates', () => {
     expect(row(cwd, older.id).invalidated_at).toBeNull();
     expect(row(cwd, newer.id).supersedes_id).toBeNull();
     expect(newer.result.stderr).toContain(`${WARNING}: ${older.id} [rule]`);
+  });
+
+  test('the warning line: hook marker, full id, domain, text, one plain sentence, no command', () => {
+    const cwd = fixture();
+    const [first] = PAIRS;
+    const older = add(cwd, first.older.text, first.older.domain);
+    const newer = add(cwd, first.newer.text, first.newer.domain);
+    expect(newer.result.exitCode).toBe(0);
+
+    const stderr = newer.result.stderr;
+    expect(stderr).toContain(MARKER);
+    expect(stderr).toContain(
+      `${WARNING}: ${older.id} [${first.older.domain}] "${first.older.text.slice(0, 80)}". ${ADVICE}\n`
+    );
+    expect(stderr.split(ADVICE)).toHaveLength(2);
+    expectNoCommand(stderr);
+  });
+
+  test('a near-duplicate add that matches a rule warns the same way, with no command', () => {
+    const cwd = fixture();
+    const [, , same] = PAIRS;
+    const rule = add(cwd, same.older.text, 'rule');
+    const first = add(cwd, same.newer.text, 'pattern');
+    // Close enough to `first` to be merged into it, and still a keyword hit on the rule.
+    const dup = add(cwd, `${same.newer.text} Checked again.`, 'pattern');
+    expect(dup.result.exitCode).toBe(0);
+    expect(dup.id).toBe(first.id);
+
+    expect(row(cwd, rule.id).invalidated_at).toBeNull();
+    expect(dup.result.stderr).toContain(`${WARNING}: ${rule.id} [rule]`);
+    expect(dup.result.stderr).toContain(ADVICE);
+    expectNoCommand(dup.result.stderr);
   });
 });
 
@@ -307,4 +353,30 @@ describe('invalidate: an id that matches nothing is an error', () => {
     expect(full.exitCode).toBe(0);
     expect(row(cwd, target.id).invalidated_at).not.toBeNull();
   });
+});
+
+describe('verify and update-belief: an id that matches nothing is an error', () => {
+  const state = (cwd: string, id: string) =>
+    withDb(cwd, db => db.query('SELECT confidence, importance, last_evaluated FROM beliefs WHERE id = ?').get(id));
+
+  for (const cmd of [['verify'], ['update-belief', '-c', '0.95']]) {
+    test(`${cmd[0]}: unknown id and short prefix exit non-zero and change nothing; the full id works`, () => {
+      const cwd = fixture();
+      const target = add(cwd, 'Backups run nightly at 03:00 to the second disk.', 'watch');
+      const before = JSON.stringify(state(cwd, target.id));
+
+      const unknown = run(cwd, [cmd[0], '00000000-0000-4000-8000-000000000000', ...cmd.slice(1)]);
+      expect(unknown.exitCode).not.toBe(0);
+      expect(unknown.stderr).toContain('Belief not found');
+
+      const prefix = run(cwd, [cmd[0], target.id.slice(0, 8), ...cmd.slice(1)]);
+      expect(prefix.exitCode).not.toBe(0);
+      expect(prefix.stderr).toContain(target.id);
+      expect(JSON.stringify(state(cwd, target.id))).toBe(before);
+
+      const full = run(cwd, [cmd[0], target.id, ...cmd.slice(1)]);
+      expect(full.exitCode).toBe(0);
+      expect(JSON.stringify(state(cwd, target.id))).not.toBe(before);
+    });
+  }
 });
